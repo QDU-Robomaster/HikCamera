@@ -1,7 +1,7 @@
 #include "HikCamera.hpp"
 
+#include "CameraBase.hpp"
 #include "MvCameraControl.h"
-#include "camera_base.hpp"
 #include "logger.hpp"
 #include "thread.hpp"
 

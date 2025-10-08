@@ -12,7 +12,7 @@ constructor_args:
       encoding: CameraBase::Encoding::RGB8
       camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
       distortion_model: CameraBase::DistortionModel::PLUMB_BOB
-      distortion_coefficients: []
+      distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
       rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
       projection_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   - runtime:
@@ -25,9 +25,9 @@ depends:
 === END MANIFEST === */
 // clang-format on
 
+#include "CameraBase.hpp"
 #include "MvCameraControl.h"
 #include "app_framework.hpp"
-#include "camera_base.hpp"
 #include "libxr.hpp"
 #include "message.hpp"
 
