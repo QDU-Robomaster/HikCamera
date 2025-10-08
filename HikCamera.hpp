@@ -21,7 +21,7 @@ constructor_args:
 template_args: []
 required_hardware: []
 depends:
-  - CameraBase
+  - qdu-future/CameraBase
 === END MANIFEST === */
 // clang-format on
 
