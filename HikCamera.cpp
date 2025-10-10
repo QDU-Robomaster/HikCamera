@@ -1,15 +1,19 @@
 #include "HikCamera.hpp"
 
-#include "CameraBase.hpp"
-#include "MvCameraControl.h"
-#include "logger.hpp"
-#include "thread.hpp"
+#include <algorithm>  // std::clamp
+#include <cstring>
 
-HikCamera::HikCamera(LibXR::HardwareContainer&, LibXR::ApplicationManager& app,
-                     const CameraBase::CameraInfo info, const RuntimeParam runtime)
-    : info_(info), runtime_(runtime)
+HikCamera::HikCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
+                     CameraBase::CameraInfo info, RuntimeParam runtime)
+    : CameraBase(hw, "hik_camera")  // <<< 新增：注册 CameraBase 命令接口
+      ,
+      info_(info),
+      runtime_(runtime)
 {
   XR_LOG_INFO("Starting HikCamera!");
+
+  // 编码保持为 RGB8（与清单一致），其余字段由流填充
+  info_.encoding = CameraBase::Encoding::RGB8;
 
   MV_CC_DEVICE_INFO_LIST device_list{};
   // enum device
@@ -26,25 +30,42 @@ HikCamera::HikCamera(LibXR::HardwareContainer&, LibXR::ApplicationManager& app,
 
   XR_LOG_PASS("Hik Camera found!");
 
-  MV_CC_CreateHandle(&camera_handle_, device_list.pDeviceInfo[0]);
-  MV_CC_OpenDevice(camera_handle_);
+  // 取第一台（可按需暴露选择逻辑）
+  if (MV_OK != MV_CC_CreateHandle(&camera_handle_, device_list.pDeviceInfo[0]))
+  {
+    XR_LOG_ERROR("MV_CC_CreateHandle failed");
+    return;
+  }
+  if (MV_OK != MV_CC_OpenDevice(camera_handle_))
+  {
+    XR_LOG_ERROR("MV_CC_OpenDevice failed");
+    return;
+  }
 
-  // Get camera information
-  MV_CC_GetImageInfo(camera_handle_, &img_info_);
+  // 获取图像基础信息
+  if (MV_OK != MV_CC_GetImageInfo(camera_handle_, &img_info_))
+  {
+    XR_LOG_ERROR("MV_CC_GetImageInfo failed");
+    return;
+  }
 
   frame_buf_ = std::make_unique<std::array<uint8_t, BUF_BYTES>>();
 
-  // Init convert param
-  convert_param_ = {};
+  // 初始化像素转换参数：源信息在抓帧时动态填写
+  std::memset(&convert_param_, 0, sizeof(convert_param_));
   convert_param_.nWidth = img_info_.nWidthValue;
   convert_param_.nHeight = img_info_.nHeightValue;
   convert_param_.enDstPixelType = PixelType_Gvsp_RGB8_Packed;
   convert_param_.pDstBuffer = frame_buf_->data();
   convert_param_.nDstBufferSize = BUF_BYTES;
 
-  UpdateParameters();
+  UpdateParameters();  // <<< 应用初始曝光/增益
 
-  MV_CC_StartGrabbing(camera_handle_);
+  if (MV_OK != MV_CC_StartGrabbing(camera_handle_))
+  {
+    XR_LOG_ERROR("MV_CC_StartGrabbing failed");
+    return;
+  }
 
   running_.store(true);
   capture_thread_.Create(this, ThreadFun, "HikCameraThread",
@@ -56,11 +77,15 @@ HikCamera::HikCamera(LibXR::HardwareContainer&, LibXR::ApplicationManager& app,
 
 HikCamera::~HikCamera()
 {
+  running_.store(false);
+  // 视你的 LibXR::Thread 实现而定：此处假设线程在析构/停止时会 join，
+  // 如果需要可补充 capture_thread_.Join();
+
   if (camera_handle_)
   {
     MV_CC_StopGrabbing(camera_handle_);
     MV_CC_CloseDevice(camera_handle_);
-    MV_CC_DestroyHandle(reinterpret_cast<void*>(camera_handle_));
+    MV_CC_DestroyHandle(camera_handle_);
     camera_handle_ = nullptr;
   }
   XR_LOG_INFO("HikCamera destroyed!");
@@ -72,26 +97,62 @@ void HikCamera::SetRuntimeParam(const RuntimeParam& p)
   UpdateParameters();
 }
 
+// --- CameraBase 接口实现 ---
+// 注意：外部命令以单位传入（定义见你的接口）。这里延续“微秒/ExposureTime”的单位约定。
+void HikCamera::SetExposure(double exposure)
+{
+  runtime_.exposure_time = static_cast<float>(exposure);
+  UpdateParameters();
+}
+
+void HikCamera::SetGain(double gain)
+{
+  runtime_.gain = static_cast<float>(gain);
+  UpdateParameters();
+}
+
 void HikCamera::UpdateParameters()
 {
-  // Exposure
-  MVCC_FLOATVALUE f_value{};
-  MV_CC_GetFloatValue(camera_handle_, "ExposureTime", &f_value);
-  runtime_.exposure_time = std::clamp(runtime_.exposure_time, f_value.fMin, f_value.fMax);
-  MV_CC_SetFloatValue(camera_handle_, "ExposureTime", runtime_.exposure_time);
-  XR_LOG_INFO("Exposure time: %f", runtime_.exposure_time);
+  if (!camera_handle_)
+  {
+    return;
+  }
+
+  // Exposure（微秒）
+  {
+    MVCC_FLOATVALUE f_value{};
+    if (MV_OK == MV_CC_GetFloatValue(camera_handle_, "ExposureTime", &f_value))
+    {
+      runtime_.exposure_time =
+          std::clamp(runtime_.exposure_time, f_value.fMin, f_value.fMax);
+      MV_CC_SetFloatValue(camera_handle_, "ExposureTime", runtime_.exposure_time);
+      XR_LOG_INFO("Exposure time: %f us", runtime_.exposure_time);
+    }
+    else
+    {
+      XR_LOG_WARN("Get ExposureTime range failed");
+    }
+  }
 
   // Gain
-  MV_CC_GetFloatValue(camera_handle_, "Gain", &f_value);
-  runtime_.gain = std::clamp(runtime_.gain, f_value.fMin, f_value.fMax);
-  MV_CC_SetFloatValue(camera_handle_, "Gain", runtime_.gain);
-  XR_LOG_INFO("Gain: %f", runtime_.gain);
+  {
+    MVCC_FLOATVALUE f_value{};
+    if (MV_OK == MV_CC_GetFloatValue(camera_handle_, "Gain", &f_value))
+    {
+      runtime_.gain = std::clamp(runtime_.gain, f_value.fMin, f_value.fMax);
+      MV_CC_SetFloatValue(camera_handle_, "Gain", runtime_.gain);
+      XR_LOG_INFO("Gain: %f", runtime_.gain);
+    }
+    else
+    {
+      XR_LOG_WARN("Get Gain range failed");
+    }
+  }
 }
 
 void HikCamera::ThreadFun(HikCamera* self)
 {
   MV_FRAME_OUT out_frame{};
-
   XR_LOG_INFO("Publishing image!");
 
   while (self->running_.load())
@@ -108,6 +169,7 @@ void HikCamera::ThreadFun(HikCamera* self)
       self->info_.step = static_cast<uint32_t>(W * CH);
       self->info_.timestamp = LibXR::Timebase::GetMicroseconds();
 
+      // Convert to RGB8
       self->convert_param_.pSrcData = out_frame.pBufAddr;
       self->convert_param_.nSrcDataLen = out_frame.stFrameInfo.nFrameLen;
       self->convert_param_.enSrcPixelType = out_frame.stFrameInfo.enPixelType;
@@ -126,12 +188,10 @@ void HikCamera::ThreadFun(HikCamera* self)
       XR_LOG_WARN("Get buffer failed! nRet: [%x]", ret);
       MV_CC_StopGrabbing(self->camera_handle_);
       MV_CC_StartGrabbing(self->camera_handle_);
-      self->fail_count_++;
-    }
-
-    if (self->fail_count_ > 5)
-    {
-      XR_LOG_ERROR("Camera failed!");
+      if (++self->fail_count_ > 5)
+      {
+        XR_LOG_ERROR("Camera failed!");
+      }
     }
   }
 }
