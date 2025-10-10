@@ -30,14 +30,15 @@ depends:
 #include "app_framework.hpp"
 #include "libxr.hpp"
 #include "message.hpp"
+#include "thread.hpp"
 
-// STL
+// STL / 3rd
+#include <array>
 #include <atomic>
 #include <memory>
 #include <opencv2/core/mat.hpp>
 
-class HikCamera : public LibXR::Application
-
+class HikCamera : public LibXR::Application, public CameraBase
 {
   static constexpr int MAX_W = 4096;
   static constexpr int MAX_H = 3072;
@@ -52,26 +53,30 @@ class HikCamera : public LibXR::Application
   };
 
  public:
-  // Main constructor (definition in .cpp)
-  explicit HikCamera(LibXR::HardwareContainer&, LibXR::ApplicationManager& app,
-                     const CameraBase::CameraInfo info, const RuntimeParam runtime);
+  // 适配 CameraBase：把 hw 传给 CameraBase(base) 构造，注册命令接口
+  explicit HikCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
+                     CameraBase::CameraInfo info, RuntimeParam runtime);
 
-  ~HikCamera();
+  ~HikCamera() override;
 
   void SetRuntimeParam(const RuntimeParam& p);
 
+  // --- CameraBase 接口实现（命令行回调用到） ---
+  void SetExposure(double exposure) override;  // microseconds
+  void SetGain(double gain) override;
+
+  // 可选监控钩子
   void OnMonitor() override {}
 
  private:
-  void UpdateParameters();
-
   static void ThreadFun(HikCamera* self);
+  void UpdateParameters();
 
   // Runtime state
   std::unique_ptr<std::array<uint8_t, BUF_BYTES>> frame_buf_{};  // large RGB buffer
 
   // Parameters
-  CameraBase::CameraInfo info_;
+  CameraBase::CameraInfo info_{};
   RuntimeParam runtime_{};
 
   // Topics
