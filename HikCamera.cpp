@@ -307,7 +307,7 @@ void HikCamera::GuardThreadFun(HikCamera* self)
     }
     self->capture_thread_.Create(self, CapThreadFun, "HikCapture",
                                  static_cast<size_t>(128 * 1024),
-                                 LibXR::Thread::Priority::MEDIUM);
+                                 LibXR::Thread::Priority::REALTIME);
   }
   XR_LOG_INFO("Hik guard thread stopped");
 }
