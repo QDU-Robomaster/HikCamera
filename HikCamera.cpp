@@ -1,313 +1,298 @@
 #include "HikCamera.hpp"
 
-#include <opencv2/opencv.hpp>
-#include <unordered_map>
-
 HikCamera::HikCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                     CameraBase::CameraInfo info, RuntimeParam runtime)
-    : CameraBase(hw, "hik_camera"), info_(info), runtime_(runtime)
+                     Config cfg)
+    : CameraBase(hw, "hik_camera"), cfg_(cfg), hik_state_(Hik::STOPPED)
 {
-  XR_LOG_INFO("Starting HikCamera (template format, logic preserved)");
+  this->CaptureInit();
+  this->ProtectRunning();
 
-  info_.encoding = CameraBase::Encoding::RGB8;
+  this->image_topic_ = LibXR::Topic("image_topic", sizeof(HikCamera::ImageData));
+  this->hik_sdk_thread_ = std::thread(
+      [&]() -> void
+      {
+        while (true)
+        {
+          if (this->hik_state_ == Hik::STOPPED)
+          {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+          }
 
-  if (!CaptureStart())
-  {
-    XR_LOG_ERROR("OpenAndConfigure failed");
-    return;
-  }
-  if (!StartGrabbing())
-  {
-    XR_LOG_ERROR("StartGrabbing failed");
-    CaptureStop();
-    return;
-  }
+          ImageData data;
 
-  camera_state_.store(true);
-  stopped_flag_.store(false);
+          bool ok = this->Read(data);
 
-  capture_thread_.Create(this, HikCamera::CapThreadFun, "HikCapture",
-                         static_cast<size_t>(128 * 1024),
-                         LibXR::Thread::Priority::REALTIME);
-  cap_thread_created_ = true;
+          if (data.image.empty() || !ok)
+          {
+            continue;
+          }
 
-  guard_thread_.Create(this, HikCamera::GuardThreadFun, "HikGuard",
-                       static_cast<size_t>(64 * 1024), LibXR::Thread::Priority::REALTIME);
-  guard_thread_created_ = true;
-
+          this->image_topic_.Publish(data);
+        }
+      });
   app.Register(*this);
 }
 
 HikCamera::~HikCamera()
 {
-  camera_state_.store(false);
-
-  if (cap_thread_created_)
+  if (this->guard_.protectthread.joinable())
   {
-    pthread_join(static_cast<LibXR::libxr_thread_handle>(capture_thread_), nullptr);
-    cap_thread_created_ = false;
+    this->guard_.protectthread.join();
   }
-
-  stop_event_.Post();
-  if (guard_thread_created_)
-  {
-    pthread_join(static_cast<LibXR::libxr_thread_handle>(guard_thread_), nullptr);
-    guard_thread_created_ = false;
-  }
-  CaptureStop();
-  XR_LOG_INFO("HikCamera destroyed");
+  this->CaptureStop();
+  XR_LOG_INFO("HikRobot destructed.");
 }
 
-// ===== CameraBase controls =====
-void HikCamera::SetExposure(double exposure)
+bool HikCamera::Read(ImageData& imgdata)
 {
-  runtime_.exposure_time = static_cast<float>(exposure);
-  UpdateParameters();
-}
-
-void HikCamera::SetGain(double gain)
-{
-  runtime_.gain = static_cast<float>(gain);
-  UpdateParameters();
-}
-
-void HikCamera::SetRuntimeParam(const RuntimeParam& p)
-{
-  runtime_ = p;
-  UpdateParameters();
-}
-
-bool HikCamera::CaptureStart()
-{
-  MV_CC_DEVICE_INFO_LIST device_list{};
-  auto ret = MV_CC_EnumDevices(MV_USB_DEVICE, &device_list);
-  XR_LOG_INFO("Enum ret=%x, count=%d", ret, device_list.nDeviceNum);
-
-  if (ret != MV_OK || device_list.nDeviceNum == 0)
+  while (this->hik_state_ == Hik::STOPPED)
   {
-    XR_LOG_ERROR("No camera found or enum failed");
-    return false;  // original semantics: do not loop, fail fast
-  }
-
-  if (MV_OK != MV_CC_CreateHandle(&camera_handle_, device_list.pDeviceInfo[0]))
-  {
-    XR_LOG_ERROR("MV_CC_CreateHandle failed");
-    return false;
-  }
-  if (MV_OK != MV_CC_OpenDevice(camera_handle_))
-  {
-    XR_LOG_ERROR("MV_CC_OpenDevice failed");
     return false;
   }
 
-  unsigned int n_image_node_num = 1;
-  if (MV_OK != MV_CC_SetImageNodeNum(camera_handle_, n_image_node_num))
+  MV_FRAME_OUT raw;
+  unsigned int ret = 0;
+  unsigned int n_msec = 100;
+
+  auto start = LibXR::Timebase::GetMicroseconds();
+  ret = MV_CC_GetImageBuffer(handle_, &raw, n_msec);
+
+  if (ret != MV_OK)
   {
-    XR_LOG_WARN("SetImageNodeNum failed");
+    XR_LOG_ERROR("MV_CC_GetImageBuffer failed: {:#x}", ret);
+    this->hik_state_ = Hik::STOPPED;
+    this->guard_.HikIsquit.notify_all();
+    return false;
   }
 
-  if (!runtime_.autocap)
+  auto timestamp = LibXR::Timebase::GetMicroseconds();
+  if ((LibXR::Timebase::GetMicroseconds() - start).ToMicrosecond() < 2000)
   {
-    MV_CC_SetEnumValueByString(camera_handle_, "AcquisitionMode", "Continuous");
-    MV_CC_SetEnumValue(camera_handle_, "TriggerMode", 1);  // On
-    MV_CC_SetEnumValueByString(camera_handle_, "TriggerSource", "Line0");
-    MV_CC_SetEnumValueByString(camera_handle_, "TriggerActivation", "RisingEdge");
+    return false;
+  }
+
+  cv::Mat img(cv::Size(raw.stFrameInfo.nWidth, raw.stFrameInfo.nHeight), CV_8U,
+              raw.pBufAddr);
+
+  const auto& frame_info = raw.stFrameInfo;
+  auto pixel_type = frame_info.enPixelType;
+  cv::Mat dst_image;
+  const static std::unordered_map<MvGvspPixelType, cv::ColorConversionCodes> TYPE_MAP = {
+      {PixelType_Gvsp_BayerGR8, cv::COLOR_BayerGR2RGB},
+      {PixelType_Gvsp_BayerRG8, cv::COLOR_BayerRG2RGB},
+      {PixelType_Gvsp_BayerGB8, cv::COLOR_BayerGB2RGB},
+      {PixelType_Gvsp_BayerBG8, cv::COLOR_BayerBG2RGB}};
+  cv::cvtColor(img, dst_image, TYPE_MAP.at(pixel_type));
+  img = dst_image;
+
+  ret = MV_CC_FreeImageBuffer(handle_, &raw);
+  if (ret != MV_OK)
+  {
+    XR_LOG_ERROR("MV_CC_FreeImageBuffer failed: {:#x}", ret);
+    this->hik_state_ = Hik::STOPPED;
+    this->guard_.HikIsquit.notify_all();
+  }
+
+  imgdata = {img, timestamp};
+  return true;
+}
+
+void HikCamera::CaptureInit()
+{
+  unsigned int ret = 0;
+
+  MV_CC_DEVICE_INFO_LIST device_list;
+  ret = MV_CC_EnumDevices(MV_USB_DEVICE, &device_list);
+  if (ret != MV_OK)
+  {
+    XR_LOG_ERROR("MV_CC_EnumDevices failed: {:#x}", ret);
+    return;
+  }
+
+  if (device_list.nDeviceNum == 0)
+  {
+    XR_LOG_ERROR("Not found camera!");
+    return;
+  }
+
+  ret = MV_CC_CreateHandle(&handle_, device_list.pDeviceInfo[0]);
+  if (ret != MV_OK)
+  {
+    XR_LOG_ERROR("MV_CC_CreateHandle failed: {:#x}", ret);
+    return;
+  }
+
+  ret = MV_CC_OpenDevice(handle_);
+  if (ret != MV_OK)
+  {
+    XR_LOG_ERROR("MV_CC_OpenDevice failed: {:#x}", ret);
+    return;
+  }
+
+  unsigned int n_image_node_num = 3;
+  ret = MV_CC_SetImageNodeNum(handle_, n_image_node_num);
+  if (MV_OK != ret)
+  {
+    // 设置失败
+    XR_LOG_ERROR("MV_CC_SetImageNodeNum failed: {:#x}", ret);
+    return;
+  }
+
+  if (!this->cfg_.autocap)
+  {
+    ret = MV_CC_SetEnumValueByString(handle_, "AcquisitionMode", "Continuous");
+    if (MV_OK != ret)
+    {
+      XR_LOG_ERROR("Set Acquisition Mode to Continuous fail! nRet [0x%x]", ret);
+      return;
+    }
+
+    //    将触发模式设置为开启 (On)
+    //    参数 "TriggerMode" 的值: 0 表示 Off, 1 表示 On
+    ret = MV_CC_SetEnumValue(handle_, "TriggerMode", 1);
+    if (MV_OK != ret)
+    {
+      XR_LOG_ERROR("Set Trigger Mode to On fail! nRet [0x%x]", ret);
+      return;
+    }
+
+    //    设置触发源为外部硬件触发 (Line0)
+    //    可用的值通常有 "Line0", "Line1", "Line2", "Software",
+    //    "FrequencyConverter" 等 请根据您的物理接线选择正确的一项
+    ret = MV_CC_SetEnumValueByString(handle_, "TriggerSource", "Line0");
+    if (MV_OK != ret)
+    {
+      XR_LOG_ERROR("Set Trigger Source to Line0 fail! nRet [0x%x]", ret);
+      return;
+    }
+
+    //    (可选) 设置触发激活方式
+    //    例如设置为上升沿触发 "RisingEdge"
+    //    其他可选值如 "FallingEdge", "LevelHigh", "LevelLow"
+    ret = MV_CC_SetEnumValueByString(handle_, "TriggerActivation", "RisingEdge");
+    if (MV_OK != ret)
+    {
+      XR_LOG_ERROR("Set Trigger Activation to RisingEdge fail! nRet [0x%x]", ret);
+      return;
+    }
   }
   else
   {
-    MV_CC_SetEnumValue(camera_handle_, "TriggerMode", 0);  // Off
+    // 将触发模式设置为开启 (On)
+    // 参数 "TriggerMode" 的值: 0 表示 Off, 1 表示 On
+    ret = MV_CC_SetEnumValue(handle_, "TriggerMode", 0);
+    if (MV_OK != ret)
+    {
+      XR_LOG_ERROR("Set Trigger Mode to Off fail! nRet [0x%x]", ret);
+      return;
+    }
   }
 
-  MV_CC_SetEnumValue(camera_handle_, "BalanceWhiteAuto", MV_BALANCEWHITE_AUTO_CONTINUOUS);
-  MV_CC_SetEnumValue(camera_handle_, "ExposureAuto", MV_EXPOSURE_AUTO_MODE_OFF);
-  MV_CC_SetEnumValue(camera_handle_, "GainAuto", MV_GAIN_MODE_OFF);
-  MV_CC_SetFloatValue(camera_handle_, "ExposureTime", runtime_.exposure_time);
-  MV_CC_SetFloatValue(camera_handle_, "Gain", runtime_.gain);
+  SetEnumValue("BalanceWhiteAuto", MV_BALANCEWHITE_AUTO_CONTINUOUS);
+  SetEnumValue("ExposureAuto", MV_EXPOSURE_AUTO_MODE_OFF);
+  SetEnumValue("GainAuto", MV_GAIN_MODE_OFF);
+  SetFloatValue("ExposureTime", this->cfg_.exposure_ms);
+  SetFloatValue("Gain", this->cfg_.gain);
 
-  MV_CC_SetFloatValue(camera_handle_, "AcquisitionFrameRate", 249.0);
+  ret = MV_CC_SetFloatValue(handle_, "AcquisitionFrameRate", 249.0);
+  if (ret != MV_OK)
+  {
+    XR_LOG_ERROR("MV_CC_SetFloatValue(set framerate) failed: {:#x}", ret);
+    return;
+  }
+  ret = MV_CC_StartGrabbing(handle_);
+  if (ret != MV_OK)
+  {
+    XR_LOG_ERROR("MV_CC_StartGrabbing failed: {:#x}", ret);
+    return;
+  }
 
-  MV_CC_GetImageInfo(camera_handle_, &img_info_);
-
-  XR_LOG_PASS("HikCamera configured");
-  XR_LOG_PASS("Camera Gain: %f, ExposureTime: %f us, AutoCap: %d", runtime_.gain,
-              runtime_.exposure_time, runtime_.autocap);
-  return true;
+  this->hik_state_ = Hik::RUNNING;
 }
 
-bool HikCamera::StartGrabbing()
+void HikCamera::ProtectRunning()
 {
-  if (MV_OK != MV_CC_StartGrabbing(camera_handle_))
-  {
-    XR_LOG_ERROR("MV_CC_StartGrabbing failed");
-    return false;
-  }
-  return true;
+  this->guard_.protectthread =
+      std::thread{[this]() -> void
+                  {
+                    std::unique_lock<std::mutex> lock(this->guard_.mux);
+                    while (true)
+                    {
+                      this->guard_.HikIsquit.wait(
+                          lock, [this] { return (this->hik_state_ == Hik::STOPPED); });
+                      this->CaptureStop();
+                      this->CaptureInit();
+                      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                  }};
 }
 
 void HikCamera::CaptureStop()
 {
-  if (!camera_handle_)
+  this->hik_state_ = Hik::STOPPED;
+  if (hik_sdk_thread_.joinable())
   {
-    return;
+    hik_sdk_thread_.join();
   }
 
-  MV_CC_StopGrabbing(camera_handle_);
-  auto ret = MV_CC_SetCommandValue(camera_handle_, "DeviceReset");
+  unsigned int ret = 0;
+
+  ret = MV_CC_StopGrabbing(handle_);
   if (ret != MV_OK)
   {
-    XR_LOG_WARN("DeviceReset failed: %x", ret);
-  }
-  MV_CC_CloseDevice(camera_handle_);
-  MV_CC_DestroyHandle(camera_handle_);
-  camera_handle_ = nullptr;
-}
-
-void HikCamera::UpdateParameters()
-{
-  if (!camera_handle_)
-  {
+    XR_LOG_ERROR("MV_CC_StopGrabbing failed: {:#x}", ret);
     return;
   }
 
-  MVCC_FLOATVALUE f_exp{};
-  if (MV_OK == MV_CC_GetFloatValue(camera_handle_, "ExposureTime", &f_exp))
+  // ret = MV_CC_SetCommandValue(handle_, "DeviceReset");
+  // if (ret != MV_OK) {
+  //     tools::logger()->error("Hard Reset failed:
+  //     MV_CC_SetCommandValue('DeviceReset') failed with {:#x}", ret);
+  //     // 即使失败，也尝试关闭设备
+  //     MV_CC_CloseDevice(handle_);
+  //     MV_CC_DestroyHandle(handle_);
+  //     return ;
+  // }
+  ret = MV_CC_CloseDevice(handle_);
+  if (ret != MV_OK)
   {
-    if (runtime_.exposure_time < f_exp.fMin)
-    {
-      runtime_.exposure_time = f_exp.fMin;
-    }
-    if (runtime_.exposure_time > f_exp.fMax)
-    {
-      runtime_.exposure_time = f_exp.fMax;
-    }
-    MV_CC_SetFloatValue(camera_handle_, "ExposureTime", runtime_.exposure_time);
-    XR_LOG_INFO("Exposure time: %f us", runtime_.exposure_time);
-  }
-  else
-  {
-    XR_LOG_WARN("Get ExposureTime range failed");
+    XR_LOG_ERROR("MV_CC_CloseDevice failed: {:#x}", ret);
+    return;
   }
 
-  MVCC_FLOATVALUE f_gain{};
-  if (MV_OK == MV_CC_GetFloatValue(camera_handle_, "Gain", &f_gain))
+  ret = MV_CC_DestroyHandle(handle_);
+  if (ret != MV_OK)
   {
-    if (runtime_.gain < f_gain.fMin)
-    {
-      runtime_.gain = f_gain.fMin;
-    }
-    if (runtime_.gain > f_gain.fMax)
-    {
-      runtime_.gain = f_gain.fMax;
-    }
-    MV_CC_SetFloatValue(camera_handle_, "Gain", runtime_.gain);
-    XR_LOG_INFO("Gain: %f", runtime_.gain);
-  }
-  else
-  {
-    XR_LOG_WARN("Get Gain range failed");
+    XR_LOG_ERROR("MV_CC_DestroyHandle failed: {:#x}", ret);
+    return;
   }
 }
 
-// ===== threads =====
-void HikCamera::CapThreadFun(HikCamera* self)
+void HikCamera::SetFloatValue(const std::string& name, double value)
 {
-  XR_LOG_INFO("Hik capture thread started");
-  MV_FRAME_OUT raw{};
+  unsigned int ret = 0;
 
-  while (self->camera_state_.load())
+  ret = MV_CC_SetFloatValue(handle_, name.c_str(), static_cast<float>(value));
+
+  if (ret != MV_OK)
   {
-    unsigned int n_msec = 100;  // original wait
-    auto ret = MV_CC_GetImageBuffer(self->camera_handle_, &raw, n_msec);
-    if (ret != MV_OK)
-    {
-      XR_LOG_WARN("MV_CC_GetImageBuffer failed: %x", ret);
-      break;  // break -> guard will restart
-    }
-
-    // timestamp
-    self->info_.timestamp = LibXR::Timebase::GetMicroseconds();
-
-    // size & step
-    const int W = raw.stFrameInfo.nWidth;
-    const int H = raw.stFrameInfo.nHeight;
-    self->info_.width = static_cast<uint32_t>(W);
-    self->info_.height = static_cast<uint32_t>(H);
-    self->info_.step = static_cast<uint32_t>(W * CH);
-
-    // construct src cv::Mat (Bayer)
-    cv::Mat src(H, W, CV_8U, raw.pBufAddr);
-
-    static const std::unordered_map<MvGvspPixelType, int> KMAP = {
-        {PixelType_Gvsp_BayerGR8, cv::COLOR_BayerGR2RGB},
-        {PixelType_Gvsp_BayerRG8, cv::COLOR_BayerRG2RGB},
-        {PixelType_Gvsp_BayerGB8, cv::COLOR_BayerGB2RGB},
-        {PixelType_Gvsp_BayerBG8, cv::COLOR_BayerBG2RGB},
-    };
-
-    auto it = KMAP.find(raw.stFrameInfo.enPixelType);
-    if (it == KMAP.end())
-    {
-      XR_LOG_WARN("Unsupported pixel type: %d", raw.stFrameInfo.enPixelType);
-      MV_CC_FreeImageBuffer(self->camera_handle_, &raw);
-      continue;
-    }
-
-    cv::Mat rgb;
-    cv::cvtColor(src, rgb, static_cast<int>(it->second));
-
-    MV_CC_FreeImageBuffer(self->camera_handle_, &raw);
-    cv::imshow("raw_img", rgb);
-
-    self->frame_topic_.Publish(rgb);
-    self->info_topic_.Publish(self->info_);
+    XR_LOG_ERROR("MV_CC_SetFloatValue(\"{}\", {}) failed: {:#x}", name.c_str(), value,
+                 ret);
+    return;
   }
-
-  // on exit -> mark stopped and signal guard
-  {
-    LibXR::Mutex::LockGuard lg(self->state_mtx_);
-    self->stopped_flag_.store(true);
-  }
-  self->stop_event_.Post();
-  XR_LOG_INFO("Hik capture thread stopped");
 }
 
-void HikCamera::GuardThreadFun(HikCamera* self)
+void HikCamera::SetEnumValue(const std::string& name, unsigned int value)
 {
-  XR_LOG_INFO("Hik guard thread started");
-  for (;;)
+  unsigned int ret = 0;
+
+  ret = MV_CC_SetEnumValue(handle_, name.c_str(), value);
+
+  if (ret != MV_OK)
   {
-    // wait for stop event (posted by capture thread)
-    self->stop_event_.Wait();
-
-    if (!self->camera_state_.load())
-    {
-      break;  // shutting down
-    }
-
-    // stop -> start -> run
-    self->CaptureStop();
-
-    if (!self->CaptureStart())
-    {
-      XR_LOG_ERROR("Re-open failed; retry in 1s");
-      LibXR::Thread::Sleep(1000);
-      continue;
-    }
-    if (!self->StartGrabbing())
-    {
-      XR_LOG_ERROR("Re-start grabbing failed; retry in 1s");
-      LibXR::Thread::Sleep(1000);
-      continue;
-    }
-
-    // re-launch capture loop if previous one has exited
-    if (!self->camera_state_.load())
-    {
-      break;
-    }
-    self->capture_thread_.Create(self, CapThreadFun, "HikCapture",
-                                 static_cast<size_t>(128 * 1024),
-                                 LibXR::Thread::Priority::REALTIME);
+    XR_LOG_ERROR("MV_CC_SetEnumValue(\"{}\", {}) failed: {:#x}", name.c_str(), value,
+                 ret);
+    return;
   }
-  XR_LOG_INFO("Hik guard thread stopped");
 }
