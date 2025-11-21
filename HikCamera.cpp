@@ -296,3 +296,67 @@ void HikCamera::SetEnumValue(const std::string& name, unsigned int value)
     return;
   }
 }
+
+void HikCamera::UpdateParameters()
+{
+  if (!handle_)
+  {
+    return;
+  }
+
+  MVCC_FLOATVALUE f_exp{};
+  if (MV_OK == MV_CC_GetFloatValue(handle_, "ExposureTime", &f_exp))
+  {
+    if (cfg_.exposure_ms < f_exp.fMin)
+    {
+      cfg_.exposure_ms = f_exp.fMin;
+    }
+    if (cfg_.exposure_ms > f_exp.fMax)
+    {
+      cfg_.exposure_ms = f_exp.fMax;
+    }
+    SetFloatValue("ExposureTime", cfg_.exposure_ms);
+    XR_LOG_INFO("Exposure time: %f ms", cfg_.exposure_ms);
+  }
+  else
+  {
+    XR_LOG_WARN("Get ExposureTime range failed");
+  }
+
+  MVCC_FLOATVALUE f_gain{};
+  if (MV_OK == MV_CC_GetFloatValue(handle_, "Gain", &f_gain))
+  {
+    if (cfg_.gain < f_gain.fMin)
+    {
+      cfg_.gain = f_gain.fMin;
+    }
+    if (cfg_.gain > f_gain.fMax)
+    {
+      cfg_.gain = f_gain.fMax;
+    }
+    SetFloatValue("Gain", cfg_.gain);
+    XR_LOG_INFO("Gain: %f", cfg_.gain);
+  }
+  else
+  {
+    XR_LOG_WARN("Get Gain range failed");
+  }
+}
+
+void HikCamera::SetExposure(double exposure)
+{
+  cfg_.exposure_ms = static_cast<float>(exposure);
+  UpdateParameters();
+}
+
+void HikCamera::SetGain(double gain)
+{
+  cfg_.gain = static_cast<float>(gain);
+  UpdateParameters();
+}
+
+void HikCamera::SetRuntimeParam(const Config& p)
+{
+  cfg_ = p;
+  UpdateParameters();
+}

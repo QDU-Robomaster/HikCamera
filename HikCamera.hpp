@@ -81,4 +81,9 @@ class HikCamera : public LibXR::Application, public CameraBase
 
   void SetFloatValue(const std::string& name, double value);
   void SetEnumValue(const std::string& name, unsigned int value);
+
+  void SetExposure(double exposure) override;
+  void SetGain(double gain) override;
+  void SetRuntimeParam(const Config& p);
+  void UpdateParameters();
 };
