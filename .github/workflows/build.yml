@@ -4,7 +4,7 @@ on:
   push:
   pull_request:
   schedule:
-    - cron: '0 3 1 * *'  # 每月1日凌晨3点（UTC）自动触发
+    - cron: '0 3 1 * *'
 
 jobs:
   build:
@@ -66,25 +66,36 @@ jobs:
         run: |
           pip3 install xrobot libxr
 
-      - name: Run xrobot_setup
+      - name: Add current repo to module list
         run: |
-          xrobot_src_man add-source https://qdu-robomaster.github.io/qdu-future-modules/index.yaml && xrobot_src_man add-source https://xrobot-org.github.io/xrobot-modules/index.yaml && xrobot_setup || true
+          xrobot_add_mod qdu-future/${{ env.XR_MODULE_NAME }}
 
-      - name: Run xrobot_init_mod
+      - name: Add xrobot source
+        run: |
+          xrobot_src_man add-source https://xrobot-org.github.io/xrobot-modules/index.yaml
+
+      - name: Add qdu-future source
+        run: |
+          xrobot_src_man add-source https://qdu-robomaster.github.io/qdu-future-modules/index.yaml
+
+      - name: Sync module repos
         run: |
           xrobot_init_mod
 
-      - name: Add BlinkLED module
+      - name: Create minimal module config
         run: |
-          xrobot_add_mod BlinkLED --instance-id BlinkLED_0
+          mkdir -p User
+          cat > User/xrobot.yaml <<'EOF'
+          global_settings:
+            monitor_sleep_ms: 1000
+          modules: []
+          EOF
+          xrobot_add_mod ${{ env.XR_MODULE_NAME }}
+          cat User/xrobot.yaml
 
-      - name: Add this repo module
+      - name: Generate main
         run: |
-          xrobot_add_mod ${{ env.XR_MODULE_NAME }} && xrobot_add_mod qdu-future/CameraBase && cat User/xrobot.yaml
-
-      - name: Generate main again
-        run: |
-          xrobot_setup
+          xrobot_gen_main --output User/xrobot_main.hpp
 
       - name: Build
         run: |
@@ -109,10 +120,8 @@ jobs:
             const SS = String(date.getUTCSeconds()).padStart(2, '0');
             const tagName = `${tagPrefix}${yyyy}${mm}${dd}-${HH}${MM}${SS}`;
 
-            // 获取当前 commit sha
             const sha = process.env.GITHUB_SHA;
 
-            // 创建 tag reference
             await github.rest.git.createRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
