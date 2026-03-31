@@ -74,6 +74,8 @@ class HikCamera : public LibXR::Application, public CameraBase
   static void CapThreadFun(HikCamera* self);
   static void GuardThreadFun(HikCamera* self);
   // ======== utils ========
+  bool SetFloatValue(const char* name, double value);
+  bool SetEnumValue(const char* name, unsigned int value);
   void UpdateParameters();
   void OnMonitor() override {};
   // ======== state ========

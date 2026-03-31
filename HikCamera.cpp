@@ -81,52 +81,88 @@ bool HikCamera::CaptureStart()
 {
   MV_CC_DEVICE_INFO_LIST device_list{};
   auto ret = MV_CC_EnumDevices(MV_USB_DEVICE, &device_list);
+  if (ret != MV_OK)
+  {
+    XR_LOG_ERROR("MV_CC_EnumDevices failed: %x", ret);
+    return false;
+  }
   XR_LOG_INFO("Enum ret=%x, count=%d", ret, device_list.nDeviceNum);
 
-  if (ret != MV_OK || device_list.nDeviceNum == 0)
+  if (device_list.nDeviceNum == 0)
   {
-    XR_LOG_ERROR("No camera found or enum failed");
+    XR_LOG_ERROR("No camera found");
     return false;  // original semantics: do not loop, fail fast
   }
 
-  if (MV_OK != MV_CC_CreateHandle(&camera_handle_, device_list.pDeviceInfo[0]))
+  ret = MV_CC_CreateHandle(&camera_handle_, device_list.pDeviceInfo[0]);
+  if (ret != MV_OK)
   {
-    XR_LOG_ERROR("MV_CC_CreateHandle failed");
+    XR_LOG_ERROR("MV_CC_CreateHandle failed: %x", ret);
     return false;
   }
-  if (MV_OK != MV_CC_OpenDevice(camera_handle_))
+  ret = MV_CC_OpenDevice(camera_handle_);
+  if (ret != MV_OK)
   {
-    XR_LOG_ERROR("MV_CC_OpenDevice failed");
+    XR_LOG_ERROR("MV_CC_OpenDevice failed: %x", ret);
     return false;
   }
 
-  unsigned int n_image_node_num = 1;
-  if (MV_OK != MV_CC_SetImageNodeNum(camera_handle_, n_image_node_num))
+  unsigned int n_image_node_num = 3;
+  ret = MV_CC_SetImageNodeNum(camera_handle_, n_image_node_num);
+  if (ret != MV_OK)
   {
-    XR_LOG_WARN("SetImageNodeNum failed");
+    XR_LOG_ERROR("MV_CC_SetImageNodeNum failed: %x", ret);
+    return false;
   }
 
   if (!runtime_.autocap)
   {
-    MV_CC_SetEnumValueByString(camera_handle_, "AcquisitionMode", "Continuous");
-    MV_CC_SetEnumValue(camera_handle_, "TriggerMode", 1);  // On
-    MV_CC_SetEnumValueByString(camera_handle_, "TriggerSource", "Line0");
-    MV_CC_SetEnumValueByString(camera_handle_, "TriggerActivation", "RisingEdge");
+    ret = MV_CC_SetEnumValueByString(camera_handle_, "AcquisitionMode", "Continuous");
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("Set AcquisitionMode failed: %x", ret);
+      return false;
+    }
+    if (!SetEnumValue("TriggerMode", 1))  // On
+    {
+      return false;
+    }
+    ret = MV_CC_SetEnumValueByString(camera_handle_, "TriggerSource", "Line0");
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("Set TriggerSource failed: %x", ret);
+      return false;
+    }
+    ret = MV_CC_SetEnumValueByString(camera_handle_, "TriggerActivation", "RisingEdge");
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("Set TriggerActivation failed: %x", ret);
+      return false;
+    }
   }
   else
   {
-    MV_CC_SetEnumValue(camera_handle_, "TriggerMode", 0);  // Off
+    if (!SetEnumValue("TriggerMode", 0))  // Off
+    {
+      return false;
+    }
   }
 
-  MV_CC_SetEnumValue(camera_handle_, "BalanceWhiteAuto", MV_BALANCEWHITE_AUTO_CONTINUOUS);
-  MV_CC_SetEnumValue(camera_handle_, "ExposureAuto", MV_EXPOSURE_AUTO_MODE_OFF);
-  MV_CC_SetEnumValue(camera_handle_, "GainAuto", MV_GAIN_MODE_OFF);
-  MV_CC_SetFloatValue(camera_handle_, "ExposureTime", runtime_.exposure_time);
-  MV_CC_SetFloatValue(camera_handle_, "Gain", runtime_.gain);
+  if (!SetEnumValue("BalanceWhiteAuto", MV_BALANCEWHITE_AUTO_CONTINUOUS) ||
+      !SetEnumValue("ExposureAuto", MV_EXPOSURE_AUTO_MODE_OFF) ||
+      !SetEnumValue("GainAuto", MV_GAIN_MODE_OFF) ||
+      !SetFloatValue("ExposureTime", runtime_.exposure_time) ||
+      !SetFloatValue("Gain", runtime_.gain) ||
+      !SetFloatValue("AcquisitionFrameRate", 249.0))
+  {
+    return false;
+  }
 
-  MV_CC_SetFloatValue(camera_handle_, "AcquisitionFrameRate", 249.0);
-
-  MV_CC_GetImageInfo(camera_handle_, &img_info_);
+  ret = MV_CC_GetImageInfo(camera_handle_, &img_info_);
+  if (ret != MV_OK)
+  {
+    XR_LOG_WARN("MV_CC_GetImageInfo failed: %x", ret);
+  }
 
   XR_LOG_PASS("HikCamera configured");
   XR_LOG_PASS("Camera Gain: %f, ExposureTime: %f us, AutoCap: %d", runtime_.gain,
@@ -151,15 +187,49 @@ void HikCamera::CaptureStop()
     return;
   }
 
-  MV_CC_StopGrabbing(camera_handle_);
-  auto ret = MV_CC_SetCommandValue(camera_handle_, "DeviceReset");
+  auto ret = MV_CC_StopGrabbing(camera_handle_);
+  if (ret != MV_OK)
+  {
+    XR_LOG_WARN("MV_CC_StopGrabbing failed: %x", ret);
+  }
+  ret = MV_CC_SetCommandValue(camera_handle_, "DeviceReset");
   if (ret != MV_OK)
   {
     XR_LOG_WARN("DeviceReset failed: %x", ret);
   }
-  MV_CC_CloseDevice(camera_handle_);
-  MV_CC_DestroyHandle(camera_handle_);
+  ret = MV_CC_CloseDevice(camera_handle_);
+  if (ret != MV_OK)
+  {
+    XR_LOG_WARN("MV_CC_CloseDevice failed: %x", ret);
+  }
+  ret = MV_CC_DestroyHandle(camera_handle_);
+  if (ret != MV_OK)
+  {
+    XR_LOG_WARN("MV_CC_DestroyHandle failed: %x", ret);
+  }
   camera_handle_ = nullptr;
+}
+
+bool HikCamera::SetFloatValue(const char* name, double value)
+{
+  const auto ret = MV_CC_SetFloatValue(camera_handle_, name, static_cast<float>(value));
+  if (ret != MV_OK)
+  {
+    XR_LOG_ERROR("MV_CC_SetFloatValue(%s, %f) failed: %x", name, value, ret);
+    return false;
+  }
+  return true;
+}
+
+bool HikCamera::SetEnumValue(const char* name, unsigned int value)
+{
+  const auto ret = MV_CC_SetEnumValue(camera_handle_, name, value);
+  if (ret != MV_OK)
+  {
+    XR_LOG_ERROR("MV_CC_SetEnumValue(%s, %u) failed: %x", name, value, ret);
+    return false;
+  }
+  return true;
 }
 
 void HikCamera::UpdateParameters()
@@ -180,7 +250,7 @@ void HikCamera::UpdateParameters()
     {
       runtime_.exposure_time = f_exp.fMax;
     }
-    MV_CC_SetFloatValue(camera_handle_, "ExposureTime", runtime_.exposure_time);
+    SetFloatValue("ExposureTime", runtime_.exposure_time);
     XR_LOG_INFO("Exposure time: %f us", runtime_.exposure_time);
   }
   else
@@ -199,7 +269,7 @@ void HikCamera::UpdateParameters()
     {
       runtime_.gain = f_gain.fMax;
     }
-    MV_CC_SetFloatValue(camera_handle_, "Gain", runtime_.gain);
+    SetFloatValue("Gain", runtime_.gain);
     XR_LOG_INFO("Gain: %f", runtime_.gain);
   }
   else
