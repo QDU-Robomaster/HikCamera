@@ -66,6 +66,11 @@ jobs:
         run: |
           pip3 install xrobot libxr
 
+      - name: Install linux build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libgpiod-dev
+
       - name: Add current repo to module list
         run: |
           xrobot_add_mod qdu-future/${{ env.XR_MODULE_NAME }}
