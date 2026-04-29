@@ -87,6 +87,15 @@ jobs:
         run: |
           xrobot_init_mod
 
+      - name: Restore current module checkout after dependency sync
+        run: |
+          rm -rf Modules/${{ env.XR_MODULE_NAME }}
+
+      - name: Checkout current module repo again
+        uses: actions/checkout@v4
+        with:
+          path: Modules/${{ env.XR_MODULE_NAME }}
+
       - name: Create minimal module config
         run: |
           mkdir -p User
