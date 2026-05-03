@@ -59,7 +59,7 @@ class HikCamera : public LibXR::Application,
   static constexpr int channel_count = 3;
   static constexpr std::size_t frame_step = static_cast<std::size_t>(camera_info.step);
   static constexpr uint64_t default_device_timestamp_tick_ns = 1;
-  static constexpr uint64_t max_device_timestamp_tick_ns = 1000000;
+  static constexpr uint32_t image_sink_wait_log_ms = 1000;
 
   static_assert(camera_info.encoding == CameraTypes::Encoding::BGR8,
                 "HikCamera publishes BGR8 frames through MV_CC_GetImageForBGR");
@@ -277,8 +277,7 @@ class HikCamera : public LibXR::Application,
   {
     MVCC_INTVALUE_EX value{};
     const auto ret = MV_CC_GetIntValueEx(camera_handle_, "DeviceTimestampIncrement", &value);
-    if (ret == MV_OK && value.nCurValue > 0 &&
-        static_cast<uint64_t>(value.nCurValue) <= max_device_timestamp_tick_ns)
+    if (ret == MV_OK && value.nCurValue > 0)
     {
       device_timestamp_tick_ns_ = static_cast<uint64_t>(value.nCurValue);
       return;
@@ -292,19 +291,6 @@ class HikCamera : public LibXR::Application,
                 static_cast<unsigned long long>(device_timestamp_tick_ns_));
   }
 
-  [[nodiscard]] uint64_t ScaleDeviceTimestampToUs(uint64_t device_timestamp) const
-  {
-    if (device_timestamp_tick_ns_ == 1000U)
-    {
-      return device_timestamp;
-    }
-    if (device_timestamp_tick_ns_ == 1U)
-    {
-      return device_timestamp / 1000U;
-    }
-    return (device_timestamp * device_timestamp_tick_ns_) / 1000U;
-  }
-
   [[nodiscard]] bool ResolveImageTimestampUs(const MV_FRAME_OUT_INFO_EX& frame_info,
                                              uint64_t& timestamp_us)
   {
@@ -316,7 +302,7 @@ class HikCamera : public LibXR::Application,
       return false;
     }
 
-    timestamp_us = ScaleDeviceTimestampToUs(device_timestamp);
+    timestamp_us = (device_timestamp * device_timestamp_tick_ns_) / 1000U;
     return true;
   }
 
@@ -335,12 +321,13 @@ class HikCamera : public LibXR::Application,
 
     const uint64_t device_timestamp =
         CombineU32(frame_info.nDevTimeStampHigh, frame_info.nDevTimeStampLow);
-    XR_LOG_INFO("HikCamera first frame: frame=%u sensor_ts=%llu us dev_tick=%llu host_ts=%lld",
+    XR_LOG_INFO("HikCamera first frame: frame=%u sensor_ts=%llu us dev_tick=%llu "
+                "host_ts=%lld counter=%u trigger=%u lost=%u",
                 frame_info.nFrameNum,
-                static_cast<unsigned long long>(ScaleDeviceTimestampToUs(device_timestamp)),
+                static_cast<unsigned long long>((device_timestamp * device_timestamp_tick_ns_) /
+                                                1000U),
                 static_cast<unsigned long long>(device_timestamp),
-                static_cast<long long>(frame_info.nHostTimeStamp));
-    XR_LOG_INFO("HikCamera first frame: frame_counter=%u trigger_index=%u lost_packet=%u",
+                static_cast<long long>(frame_info.nHostTimeStamp),
                 frame_info.nFrameCounter,
                 frame_info.nTriggerIndex,
                 frame_info.nLostPacket);
@@ -361,9 +348,15 @@ class HikCamera : public LibXR::Application,
 
   void WaitForImageSink()
   {
+    uint32_t waited_ms = 0;
     while (camera_state_.load() && !this->ImageSinkReady())
     {
       LibXR::Thread::Sleep(1);
+      ++waited_ms;
+      if (waited_ms % image_sink_wait_log_ms == 0)
+      {
+        XR_LOG_WARN("HikCamera waiting image sink: %u ms", waited_ms);
+      }
     }
   }
 
