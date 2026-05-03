@@ -118,7 +118,7 @@ class HikCamera : public LibXR::Application,
   void OnMonitor() override
   {
     XR_LOG_INFO("HikCamera monitor: frames=%u failures=%u",
-                frames_committed_.load(), failure_count_.load());
+                frames_committed_, failure_count_);
   }
 
   void SetExposure(double exposure) override
@@ -298,7 +298,9 @@ class HikCamera : public LibXR::Application,
         CombineU32(frame_info.nDevTimeStampHigh, frame_info.nDevTimeStampLow);
     if (dev_ts == 0)
     {
-      LogMissingDeviceTimestamp(frame_info);
+      XR_LOG_ERROR("HikCamera frame has no device timestamp: frame=%u host_ts=%lld",
+                   frame_info.nFrameNum,
+                   static_cast<long long>(frame_info.nHostTimeStamp));
       return false;
     }
 
@@ -311,38 +313,19 @@ class HikCamera : public LibXR::Application,
     return (static_cast<uint64_t>(high) << 32U) | static_cast<uint64_t>(low);
   }
 
-  void LogFirstFrameMetadata(const MV_FRAME_OUT_INFO_EX& frame_info)
+  void LogFirstCommittedFrame(const MV_FRAME_OUT_INFO_EX& frame_info, uint64_t timestamp_us)
   {
-    if (first_frame_metadata_logged_)
-    {
-      return;
-    }
-    first_frame_metadata_logged_ = true;
-
     const uint64_t dev_ts =
         CombineU32(frame_info.nDevTimeStampHigh, frame_info.nDevTimeStampLow);
     XR_LOG_INFO("HikCamera first frame: frame=%u sensor_ts=%llu us dev_ts=%llu "
                 "host_ts=%lld counter=%u trigger=%u lost=%u",
                 frame_info.nFrameNum,
-                static_cast<unsigned long long>((dev_ts * device_timestamp_tick_ns_) / 1000U),
+                static_cast<unsigned long long>(timestamp_us),
                 static_cast<unsigned long long>(dev_ts),
                 static_cast<long long>(frame_info.nHostTimeStamp),
                 frame_info.nFrameCounter,
                 frame_info.nTriggerIndex,
                 frame_info.nLostPacket);
-  }
-
-  void LogMissingDeviceTimestamp(const MV_FRAME_OUT_INFO_EX& frame_info)
-  {
-    if (missing_device_timestamp_logged_)
-    {
-      return;
-    }
-    missing_device_timestamp_logged_ = true;
-
-    XR_LOG_ERROR("HikCamera frame has no device timestamp: frame=%u host_ts=%lld",
-                 frame_info.nFrameNum,
-                 static_cast<long long>(frame_info.nHostTimeStamp));
   }
 
   void WaitForImageSink()
@@ -377,7 +360,7 @@ class HikCamera : public LibXR::Application,
           &frame_info, static_cast<int>(runtime_.grab_timeout_ms));
       if (ret != MV_OK)
       {
-        failure_count_.fetch_add(1);
+        ++failure_count_;
         continue;
       }
 
@@ -386,26 +369,29 @@ class HikCamera : public LibXR::Application,
       {
         XR_LOG_ERROR("HikCamera frame geometry mismatch: %ux%u len=%u",
                      frame_info.nWidth, frame_info.nHeight, frame_info.nFrameLen);
-        failure_count_.fetch_add(1);
+        ++failure_count_;
         continue;
       }
 
       uint64_t image_timestamp_us = 0;
       if (!ResolveImageTimestampUs(frame_info, image_timestamp_us))
       {
-        failure_count_.fetch_add(1);
+        ++failure_count_;
         continue;
       }
 
       image->timestamp_us = image_timestamp_us;
-      LogFirstFrameMetadata(frame_info);
       if (this->CommitImage())
       {
-        frames_committed_.fetch_add(1);
+        if (frames_committed_ == 0)
+        {
+          LogFirstCommittedFrame(frame_info, image_timestamp_us);
+        }
+        ++frames_committed_;
       }
       else
       {
-        failure_count_.fetch_add(1);
+        ++failure_count_;
       }
     }
   }
@@ -419,8 +405,6 @@ class HikCamera : public LibXR::Application,
   LibXR::Thread capture_thread_{};
   bool capture_thread_created_{false};
   uint64_t device_timestamp_tick_ns_{default_device_timestamp_tick_ns};
-  std::atomic<uint32_t> frames_committed_{0};
-  std::atomic<uint32_t> failure_count_{0};
-  bool first_frame_metadata_logged_{false};
-  bool missing_device_timestamp_logged_{false};
+  uint32_t frames_committed_{0};
+  uint32_t failure_count_{0};
 };
