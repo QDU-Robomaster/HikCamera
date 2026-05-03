@@ -33,7 +33,6 @@ depends:
 
 #include <atomic>
 #include <cstdint>
-#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -59,6 +58,8 @@ class HikCamera : public LibXR::Application,
   static inline constexpr auto camera_info = Base::camera_info;
   static constexpr int channel_count = 3;
   static constexpr std::size_t frame_step = static_cast<std::size_t>(camera_info.step);
+  static constexpr uint64_t default_device_timestamp_tick_ns = 1;
+  static constexpr uint64_t max_device_timestamp_tick_ns = 1000000;
 
   static_assert(camera_info.encoding == CameraTypes::Encoding::BGR8,
                 "HikCamera publishes BGR8 frames through MV_CC_GetImageForBGR");
@@ -169,127 +170,6 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
-  void LogIntNode(const char* name) const
-  {
-    MVCC_INTVALUE_EX value{};
-    const auto ret = MV_CC_GetIntValueEx(camera_handle_, name, &value);
-    if (ret == MV_OK)
-    {
-      XR_LOG_INFO("HikCamera node %s: cur=%lld min=%lld max=%lld inc=%lld",
-                  name,
-                  static_cast<long long>(value.nCurValue),
-                  static_cast<long long>(value.nMin),
-                  static_cast<long long>(value.nMax),
-                  static_cast<long long>(value.nInc));
-    }
-    else
-    {
-      XR_LOG_WARN("HikCamera node %s unavailable: %d", name, ret);
-    }
-  }
-
-  void LogFloatNode(const char* name) const
-  {
-    MVCC_FLOATVALUE value{};
-    const auto ret = MV_CC_GetFloatValue(camera_handle_, name, &value);
-    if (ret == MV_OK)
-    {
-      XR_LOG_INFO("HikCamera node %s: cur=%.6f min=%.6f max=%.6f",
-                  name,
-                  static_cast<double>(value.fCurValue),
-                  static_cast<double>(value.fMin),
-                  static_cast<double>(value.fMax));
-    }
-    else
-    {
-      XR_LOG_WARN("HikCamera node %s unavailable: %d", name, ret);
-    }
-  }
-
-  void LogEnumNode(const char* name) const
-  {
-    MVCC_ENUMVALUE value{};
-    const auto ret = MV_CC_GetEnumValue(camera_handle_, name, &value);
-    if (ret == MV_OK)
-    {
-      XR_LOG_INFO("HikCamera node %s: cur=%u supported=%u",
-                  name, value.nCurValue, value.nSupportedNum);
-    }
-    else
-    {
-      XR_LOG_WARN("HikCamera node %s unavailable: %d", name, ret);
-    }
-  }
-
-  void LogBoolNode(const char* name) const
-  {
-    bool value = false;
-    const auto ret = MV_CC_GetBoolValue(camera_handle_, name, &value);
-    if (ret == MV_OK)
-    {
-      XR_LOG_INFO("HikCamera node %s: cur=%d", name, value ? 1 : 0);
-    }
-    else
-    {
-      XR_LOG_WARN("HikCamera node %s unavailable: %d", name, ret);
-    }
-  }
-
-  void LogCommandNode(const char* name) const
-  {
-    const auto ret = MV_CC_SetCommandValue(camera_handle_, name);
-    if (ret == MV_OK)
-    {
-      XR_LOG_INFO("HikCamera command %s: executed", name);
-    }
-    else
-    {
-      XR_LOG_WARN("HikCamera command %s unavailable: %d", name, ret);
-    }
-  }
-
-  void LogFrameSpecInfoAbility() const
-  {
-    MVCC_INTVALUE value{};
-    const auto ret = MV_CC_GetFrameSpecInfoAbility(camera_handle_, &value);
-    if (ret == MV_OK)
-    {
-      XR_LOG_INFO("HikCamera FrameSpecInfoAbility: cur=0x%x min=0x%x max=0x%x inc=0x%x",
-                  value.nCurValue, value.nMin, value.nMax, value.nInc);
-    }
-    else
-    {
-      XR_LOG_WARN("HikCamera FrameSpecInfoAbility unavailable: %d", ret);
-    }
-  }
-
-  void LogTimestampDiagnostics()
-  {
-    XR_LOG_INFO("HikCamera timestamp source: host timestamp; device timestamp only logged");
-
-    LogIntNode("DeviceTimestamp");
-    LogIntNode("DeviceTimestampIncrement");
-    LogCommandNode("DeviceTimestampLatch");
-    LogIntNode("DeviceTimestamp");
-
-    LogIntNode("TimestampLatchValue");
-    LogIntNode("TimestampTickFrequency");
-    LogIntNode("TimestampIncrement");
-
-    LogFrameSpecInfoAbility();
-    LogBoolNode("ChunkModeActive");
-    LogEnumNode("ChunkSelector");
-    LogBoolNode("ChunkEnable");
-
-    LogEnumNode("AcquisitionMode");
-    LogEnumNode("TriggerMode");
-    LogEnumNode("TriggerSource");
-    LogEnumNode("TriggerActivation");
-    LogFloatNode("TriggerDelay");
-    LogFloatNode("ExposureTime");
-    LogFloatNode("Gain");
-  }
-
   bool CaptureStart()
   {
     MV_CC_DEVICE_INFO_LIST device_list{};
@@ -350,11 +230,13 @@ class HikCamera : public LibXR::Application,
       return false;
     }
 
-    LogTimestampDiagnostics();
+    ConfigureDeviceTimestamp();
 
-    XR_LOG_PASS("HikCamera configured: trigger=%s gain=%.3f exposure=%.3f us",
+    XR_LOG_PASS("HikCamera configured: trigger=%s gain=%.3f exposure=%.3f us "
+                "timestamp_tick=%llu ns",
                 runtime_.external_trigger ? "external" : "freerun",
-                runtime_.gain, runtime_.exposure_time);
+                runtime_.gain, runtime_.exposure_time,
+                static_cast<unsigned long long>(device_timestamp_tick_ns_));
     return true;
   }
 
@@ -391,14 +273,51 @@ class HikCamera : public LibXR::Application,
     (void)SetFloatValue("Gain", runtime_.gain);
   }
 
-  uint64_t ResolveImageTimestampUs(const MV_FRAME_OUT_INFO_EX& frame_info) const
+  void ConfigureDeviceTimestamp()
   {
-    // Keep CameraBase timestamps in host time until device tick scale is verified on hardware.
-    if (frame_info.nHostTimeStamp > 0)
+    MVCC_INTVALUE_EX value{};
+    const auto ret = MV_CC_GetIntValueEx(camera_handle_, "DeviceTimestampIncrement", &value);
+    if (ret == MV_OK && value.nCurValue > 0 &&
+        static_cast<uint64_t>(value.nCurValue) <= max_device_timestamp_tick_ns)
     {
-      return static_cast<uint64_t>(frame_info.nHostTimeStamp);
+      device_timestamp_tick_ns_ = static_cast<uint64_t>(value.nCurValue);
+      return;
     }
-    return static_cast<uint64_t>(LibXR::Timebase::GetMicroseconds());
+
+    device_timestamp_tick_ns_ = default_device_timestamp_tick_ns;
+    XR_LOG_WARN("HikCamera DeviceTimestampIncrement unavailable: ret=%d value=%lld, "
+                "assume %llu ns/tick",
+                ret,
+                static_cast<long long>(value.nCurValue),
+                static_cast<unsigned long long>(device_timestamp_tick_ns_));
+  }
+
+  [[nodiscard]] uint64_t ScaleDeviceTimestampToUs(uint64_t device_timestamp) const
+  {
+    if (device_timestamp_tick_ns_ == 1000U)
+    {
+      return device_timestamp;
+    }
+    if (device_timestamp_tick_ns_ == 1U)
+    {
+      return device_timestamp / 1000U;
+    }
+    return (device_timestamp * device_timestamp_tick_ns_) / 1000U;
+  }
+
+  [[nodiscard]] bool ResolveImageTimestampUs(const MV_FRAME_OUT_INFO_EX& frame_info,
+                                             uint64_t& timestamp_us)
+  {
+    const uint64_t device_timestamp =
+        CombineU32(frame_info.nDevTimeStampHigh, frame_info.nDevTimeStampLow);
+    if (device_timestamp == 0)
+    {
+      LogMissingDeviceTimestamp(frame_info);
+      return false;
+    }
+
+    timestamp_us = ScaleDeviceTimestampToUs(device_timestamp);
+    return true;
   }
 
   static uint64_t CombineU32(uint32_t high, uint32_t low)
@@ -408,33 +327,36 @@ class HikCamera : public LibXR::Application,
 
   void LogFirstFrameMetadata(const MV_FRAME_OUT_INFO_EX& frame_info)
   {
-    bool expected = false;
-    if (!first_frame_metadata_logged_.compare_exchange_strong(expected, true))
+    if (first_frame_metadata_logged_)
     {
       return;
     }
+    first_frame_metadata_logged_ = true;
 
     const uint64_t device_timestamp =
         CombineU32(frame_info.nDevTimeStampHigh, frame_info.nDevTimeStampLow);
-    XR_LOG_INFO("HikCamera first frame: frame=%u host_ts=%lld dev_ts=%llu hi=0x%x low=0x%x",
+    XR_LOG_INFO("HikCamera first frame: frame=%u sensor_ts=%llu us dev_tick=%llu host_ts=%lld",
                 frame_info.nFrameNum,
-                static_cast<long long>(frame_info.nHostTimeStamp),
+                static_cast<unsigned long long>(ScaleDeviceTimestampToUs(device_timestamp)),
                 static_cast<unsigned long long>(device_timestamp),
-                frame_info.nDevTimeStampHigh,
-                frame_info.nDevTimeStampLow);
-    XR_LOG_INFO("HikCamera first frame spec: second=%u cycle=%u offset=%u frame_counter=%u trigger_index=%u input=0x%x output=0x%x",
-                frame_info.nSecondCount,
-                frame_info.nCycleCount,
-                frame_info.nCycleOffset,
+                static_cast<long long>(frame_info.nHostTimeStamp));
+    XR_LOG_INFO("HikCamera first frame: frame_counter=%u trigger_index=%u lost_packet=%u",
                 frame_info.nFrameCounter,
                 frame_info.nTriggerIndex,
-                frame_info.nInput,
-                frame_info.nOutput);
-    XR_LOG_INFO("HikCamera first frame exposure: gain=%.3f exposure=%.3f brightness=%u lost_packet=%u",
-                static_cast<double>(frame_info.fGain),
-                static_cast<double>(frame_info.fExposureTime),
-                frame_info.nAverageBrightness,
                 frame_info.nLostPacket);
+  }
+
+  void LogMissingDeviceTimestamp(const MV_FRAME_OUT_INFO_EX& frame_info)
+  {
+    if (missing_device_timestamp_logged_)
+    {
+      return;
+    }
+    missing_device_timestamp_logged_ = true;
+
+    XR_LOG_ERROR("HikCamera frame has no device timestamp: frame=%u host_ts=%lld",
+                 frame_info.nFrameNum,
+                 static_cast<long long>(frame_info.nHostTimeStamp));
   }
 
   void WaitForImageSink()
@@ -476,7 +398,14 @@ class HikCamera : public LibXR::Application,
         continue;
       }
 
-      image->timestamp_us = ResolveImageTimestampUs(frame_info);
+      uint64_t image_timestamp_us = 0;
+      if (!ResolveImageTimestampUs(frame_info, image_timestamp_us))
+      {
+        failure_count_.fetch_add(1);
+        continue;
+      }
+
+      image->timestamp_us = image_timestamp_us;
       LogFirstFrameMetadata(frame_info);
       if (this->CommitImage())
       {
@@ -497,7 +426,9 @@ class HikCamera : public LibXR::Application,
   std::atomic<bool> camera_state_{false};
   LibXR::Thread capture_thread_{};
   bool capture_thread_created_{false};
+  uint64_t device_timestamp_tick_ns_{default_device_timestamp_tick_ns};
   std::atomic<uint32_t> frames_committed_{0};
   std::atomic<uint32_t> failure_count_{0};
-  std::atomic<bool> first_frame_metadata_logged_{false};
+  bool first_frame_metadata_logged_{false};
+  bool missing_device_timestamp_logged_{false};
 };
