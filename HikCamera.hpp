@@ -294,15 +294,15 @@ class HikCamera : public LibXR::Application,
   [[nodiscard]] bool ResolveImageTimestampUs(const MV_FRAME_OUT_INFO_EX& frame_info,
                                              uint64_t& timestamp_us)
   {
-    const uint64_t device_timestamp =
+    const uint64_t dev_ts =
         CombineU32(frame_info.nDevTimeStampHigh, frame_info.nDevTimeStampLow);
-    if (device_timestamp == 0)
+    if (dev_ts == 0)
     {
       LogMissingDeviceTimestamp(frame_info);
       return false;
     }
 
-    timestamp_us = (device_timestamp * device_timestamp_tick_ns_) / 1000U;
+    timestamp_us = (dev_ts * device_timestamp_tick_ns_) / 1000U;
     return true;
   }
 
@@ -319,14 +319,13 @@ class HikCamera : public LibXR::Application,
     }
     first_frame_metadata_logged_ = true;
 
-    const uint64_t device_timestamp =
+    const uint64_t dev_ts =
         CombineU32(frame_info.nDevTimeStampHigh, frame_info.nDevTimeStampLow);
-    XR_LOG_INFO("HikCamera first frame: frame=%u sensor_ts=%llu us dev_tick=%llu "
+    XR_LOG_INFO("HikCamera first frame: frame=%u sensor_ts=%llu us dev_ts=%llu "
                 "host_ts=%lld counter=%u trigger=%u lost=%u",
                 frame_info.nFrameNum,
-                static_cast<unsigned long long>((device_timestamp * device_timestamp_tick_ns_) /
-                                                1000U),
-                static_cast<unsigned long long>(device_timestamp),
+                static_cast<unsigned long long>((dev_ts * device_timestamp_tick_ns_) / 1000U),
+                static_cast<unsigned long long>(dev_ts),
                 static_cast<long long>(frame_info.nHostTimeStamp),
                 frame_info.nFrameCounter,
                 frame_info.nTriggerIndex,
