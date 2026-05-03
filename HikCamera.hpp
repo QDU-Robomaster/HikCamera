@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: Hikrobot USB camera producer for the CameraBase image lease contract
+module_description: Hikrobot USB 相机采集模块，按 CameraBase 图像槽位合约发布图像
 constructor_args:
   - runtime:
       camera_name: "camera"
@@ -46,6 +46,12 @@ depends:
 #include "logger.hpp"
 #include "thread.hpp"
 
+/**
+ * @brief Hikrobot USB 相机采集模块。
+ *
+ * 本模块只发布图像：像素写入 `CameraBase` 图像槽位，时间戳来自相机 SDK
+ * 的设备时间戳。IMU 原始数据和同步命令由板端/同步模块负责。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 class HikCamera : public LibXR::Application,
                   public CameraBase<CameraInfoV>
@@ -68,17 +74,20 @@ class HikCamera : public LibXR::Application,
   static_assert(Base::image_bytes <= std::numeric_limits<unsigned int>::max(),
                 "Hik SDK image buffer size is unsigned int");
 
+  /**
+   * @brief xrobot YAML 传入的运行时参数。
+   */
   struct RuntimeParam
   {
-    std::string_view camera_name = "camera";
-    std::string_view image_topic_name = "camera_image";
-    std::string_view imu_topic_name = "camera_imu";
-    float gain = 32.0F;
-    float exposure_time = 600.0F;
-    bool external_trigger = true;
-    float acquisition_frame_rate = 249.0F;
-    uint32_t grab_timeout_ms = 100;
-    uint32_t image_node_num = 3;
+    std::string_view camera_name = "camera";  ///< CameraBase 相机名。
+    std::string_view image_topic_name = "camera_image";  ///< 图像共享话题名。
+    std::string_view imu_topic_name = "camera_imu";  ///< 同步后 IMU 话题名。
+    float gain = 32.0F;  ///< 相机增益。
+    float exposure_time = 600.0F;  ///< 曝光时间，单位微秒。
+    bool external_trigger = true;  ///< true 时使用 Line0 上升沿外触发。
+    float acquisition_frame_rate = 249.0F;  ///< 非外触发模式下的自由运行帧率。
+    uint32_t grab_timeout_ms = 100;  ///< SDK 等待一帧图像的超时时间。
+    uint32_t image_node_num = 3;  ///< SDK 内部取流缓存节点数。
   };
 
   explicit HikCamera(LibXR::HardwareContainer& hw,
@@ -294,6 +303,7 @@ class HikCamera : public LibXR::Application,
   [[nodiscard]] bool ResolveImageTimestampUs(const MV_FRAME_OUT_INFO_EX& frame_info,
                                              uint64_t& timestamp_us)
   {
+    // dev_ts 是 SDK 提供的设备侧时间戳；不能退回主机到达时间做同步。
     const uint64_t dev_ts =
         CombineU32(frame_info.nDevTimeStampHigh, frame_info.nDevTimeStampLow);
     if (dev_ts == 0)

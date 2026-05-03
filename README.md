@@ -15,6 +15,7 @@
 - 如果 `DeviceTimestampIncrement` 不可用，会按 USB3 Vision 常见的 `1 ns/tick` 降级，并打印告警。
 - 如果某一帧没有 `dev_ts`，该帧会被丢弃；不会用 `nHostTimeStamp` 或 `Timebase` 冒充传感器时间。
 - `nHostTimeStamp` 只在首帧日志中作为 SDK/主机侧对照信息输出，不参与同步。
+- 图像写入 `CameraBase` 槽位后立即提交；图像队列和同步关系由 `CameraFrameSync` 管。
 
 ## 运行参数
 
