@@ -6,15 +6,6 @@ target_include_directories(xr
     ${CMAKE_CURRENT_LIST_DIR}/hikSDK/include
 )
 
-foreach(_prop COMPILE_DEFINITIONS INTERFACE_COMPILE_DEFINITIONS)
-  get_target_property(_defs xr ${_prop})
-  if(_defs)
-    list(FILTER _defs EXCLUDE REGEX "^LIBXR_PRINT_INTEGER_ENABLE_64BIT=")
-    set_property(TARGET xr PROPERTY ${_prop} ${_defs})
-  endif()
-endforeach()
-target_compile_definitions(xr PUBLIC LIBXR_PRINT_INTEGER_ENABLE_64BIT=1)
-
 get_filename_component(_MODULE_DIRNAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 set(_DEPS_TARGET "${_MODULE_DIRNAME}_deps")
 add_library(${_DEPS_TARGET} INTERFACE)

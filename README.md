@@ -6,6 +6,12 @@
 模块实现集中在 `HikCamera.hpp`。仓库内的 `hikSDK/include` 与 `hikSDK/lib`
 是构建所需的 Hikrobot SDK 头文件和动态库。
 
+## 构建边界
+
+模块日志会输出 `uint64_t` 传感器时间戳和 Hikrobot 时间戳。BSP 或 CI 的顶层
+CMake 必须在 `add_subdirectory(libxr)` 前打开
+`LIBXR_PRINT_INTEGER_ENABLE_64BIT`，模块 CMake 不修改 libxr print profile。
+
 ## 时间戳
 
 发布到 `ImageFrame::timestamp_us` 的时间戳来自相机硬件，不使用主机到达时间。
