@@ -8,8 +8,8 @@ constructor_args:
       camera_name: "camera"
       image_topic_name: "camera_image"
       imu_topic_name: "camera_imu"
-      gain: 32.0
-      exposure_time: 600.0
+      gain: 16.0
+      exposure_time: 2000.0
       external_trigger: true
       acquisition_frame_rate: 249.0
       grab_timeout_ms: 100
@@ -66,6 +66,7 @@ class HikCamera : public LibXR::Application,
   static constexpr std::size_t frame_step = static_cast<std::size_t>(camera_info.step);
   static constexpr uint64_t microseconds_per_second = 1000000ULL;
   static constexpr uint32_t image_sink_wait_log_ms = 1000;
+  static constexpr float max_gain = 16.0F;
 
   static_assert(camera_info.encoding == CameraTypes::Encoding::BGR8,
                 "HikCamera publishes BGR8 frames through MV_CC_GetImageForBGR");
@@ -82,8 +83,8 @@ class HikCamera : public LibXR::Application,
     std::string_view camera_name = "camera";  ///< CameraBase 相机名。
     std::string_view image_topic_name = "camera_image";  ///< 图像共享话题名。
     std::string_view imu_topic_name = "camera_imu";  ///< 同步后 IMU 话题名。
-    float gain = 32.0F;  ///< 相机增益。
-    float exposure_time = 600.0F;  ///< 曝光时间，单位微秒。
+    float gain = 16.0F;  ///< 相机增益。
+    float exposure_time = 2000.0F;  ///< 曝光时间，单位微秒。
     bool external_trigger = true;  ///< true 时使用 Line0 上升沿外触发。
     float acquisition_frame_rate = 249.0F;  ///< 非外触发模式下的自由运行帧率。
     uint32_t grab_timeout_ms = 100;  ///< SDK 等待一帧图像的超时时间。
@@ -96,6 +97,7 @@ class HikCamera : public LibXR::Application,
       : Base(hw, runtime.camera_name, runtime.image_topic_name, runtime.imu_topic_name),
         runtime_(runtime)
   {
+    runtime_.gain = ClampGain(runtime_.gain);
     XR_LOG_INFO("Starting HikCamera: external_trigger=%d", runtime_.external_trigger ? 1 : 0);
     if (CaptureStart() && StartGrabbing())
     {
@@ -138,11 +140,22 @@ class HikCamera : public LibXR::Application,
 
   void SetGain(double gain) override
   {
-    runtime_.gain = static_cast<float>(gain);
+    runtime_.gain = ClampGain(static_cast<float>(gain));
     UpdateParameters();
   }
 
  private:
+  static float ClampGain(float gain)
+  {
+    if (gain > max_gain)
+    {
+      XR_LOG_WARN("HikCamera gain %.3f exceeds max %.3f; clamping",
+                  static_cast<double>(gain), static_cast<double>(max_gain));
+      return max_gain;
+    }
+    return gain;
+  }
+
   bool SetFloatValue(const char* name, double value)
   {
     const auto ret = MV_CC_SetFloatValue(camera_handle_, name, static_cast<float>(value));

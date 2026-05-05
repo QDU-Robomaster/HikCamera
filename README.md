@@ -34,7 +34,15 @@ CMake 必须在 `add_subdirectory(libxr)` 前打开
 - `external_trigger = true`
 - `TriggerSource = Line0`
 - `TriggerActivation = RisingEdge`
+- `ExposureAuto = Off`
+- `GainAuto = Off`
+- `BalanceWhiteAuto = Continuous`
+- `exposure_time = 2000us`
+- `gain = 16`
 - `encoding = BGR8`
+
+`gain` 会被限制到 `16`，运行时调用 `SetGain()` 传入更大值时会打印警告并按
+`16` 下发给 SDK。
 
 关闭外部触发时，模块会配置 `AcquisitionFrameRate`，由相机自由运行。
 
