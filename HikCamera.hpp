@@ -64,6 +64,7 @@ class HikCamera : public LibXR::Application,
   static inline constexpr auto camera_info = Base::camera_info;
   static constexpr int channel_count = 3;
   static constexpr std::size_t frame_step = static_cast<std::size_t>(camera_info.step);
+  static constexpr uint64_t microseconds_per_second = 1000000ULL;
   static constexpr uint32_t image_sink_wait_log_ms = 1000;
 
   static_assert(camera_info.encoding == CameraTypes::Encoding::BGR8,
@@ -238,13 +239,13 @@ class HikCamera : public LibXR::Application,
       return false;
     }
 
-    ProbeDeviceTimestampIncrement();
+    ProbeDeviceTimestampFrequency();
 
     XR_LOG_PASS("HikCamera configured: trigger=%s gain=%.3f exposure=%.3f us "
-                "timestamp_increment_raw=%llu",
+                "timestamp_freq_hz=%llu",
                 runtime_.external_trigger ? "external" : "freerun",
                 runtime_.gain, runtime_.exposure_time,
-                static_cast<unsigned long long>(device_timestamp_increment_raw_));
+                static_cast<unsigned long long>(device_timestamp_frequency_hz_));
     return true;
   }
 
@@ -281,19 +282,21 @@ class HikCamera : public LibXR::Application,
     (void)SetFloatValue("Gain", runtime_.gain);
   }
 
-  void ProbeDeviceTimestampIncrement()
+  void ProbeDeviceTimestampFrequency()
   {
     MVCC_INTVALUE_EX value{};
     const auto ret = MV_CC_GetIntValueEx(camera_handle_, "DeviceTimestampIncrement", &value);
     if (ret == MV_OK && value.nCurValue > 0)
     {
-      device_timestamp_increment_raw_ = static_cast<uint64_t>(value.nCurValue);
+      device_timestamp_frequency_hz_ = static_cast<uint64_t>(value.nCurValue);
       return;
     }
 
-    device_timestamp_increment_raw_ = 0;
-    XR_LOG_WARN("HikCamera DeviceTimestampIncrement unavailable: ret=%d value=%lld",
-                ret, static_cast<long long>(value.nCurValue));
+    device_timestamp_frequency_hz_ = microseconds_per_second;
+    XR_LOG_WARN("HikCamera DeviceTimestampIncrement unavailable: ret=%d value=%lld, "
+                "assume %llu Hz",
+                ret, static_cast<long long>(value.nCurValue),
+                static_cast<unsigned long long>(device_timestamp_frequency_hz_));
   }
 
   [[nodiscard]] bool ResolveImageTimestampUs(const MV_FRAME_OUT_INFO_EX& frame_info,
@@ -310,18 +313,27 @@ class HikCamera : public LibXR::Application,
       return false;
     }
 
-    // Hik USB cameras expose nDevTimeStamp as a monotonically increasing
-    // microsecond device timestamp. DeviceTimestampIncrement is logged only as
-    // a diagnostic GenICam value; treating it as ns/tick makes current USB
-    // devices overflow uint64_t and inflates the frame period by orders of
-    // magnitude.
-    timestamp_us = dev_ts;
+    timestamp_us = DeviceTicksToUs(dev_ts);
     return true;
   }
 
   static uint64_t CombineU32(uint32_t high, uint32_t low)
   {
     return (static_cast<uint64_t>(high) << 32U) | static_cast<uint64_t>(low);
+  }
+
+  uint64_t DeviceTicksToUs(uint64_t dev_ts) const
+  {
+    const uint64_t freq = device_timestamp_frequency_hz_;
+    if (freq == 0 || freq == microseconds_per_second)
+    {
+      return dev_ts;
+    }
+
+    const uint64_t seconds = dev_ts / freq;
+    const uint64_t remainder = dev_ts % freq;
+    return seconds * microseconds_per_second +
+           (remainder * microseconds_per_second) / freq;
   }
 
   void LogFirstCommittedFrame(const MV_FRAME_OUT_INFO_EX& frame_info, uint64_t timestamp_us)
@@ -415,7 +427,7 @@ class HikCamera : public LibXR::Application,
   std::atomic<bool> camera_state_{false};
   LibXR::Thread capture_thread_{};
   bool capture_thread_created_{false};
-  uint64_t device_timestamp_increment_raw_{0};
+  uint64_t device_timestamp_frequency_hz_{microseconds_per_second};
   uint32_t frames_committed_{0};
   uint32_t failure_count_{0};
 };

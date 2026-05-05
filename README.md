@@ -17,9 +17,12 @@ CMake 必须在 `add_subdirectory(libxr)` 前打开
 发布到 `ImageFrame::timestamp_us` 的时间戳来自相机硬件，不使用主机到达时间。
 
 - 原始硬件时间戳来自 SDK 帧信息里的 `nDevTimeStampHigh / nDevTimeStampLow`，代码中合成为 `dev_ts`。
-- 当前 Hik USB 相机的 `dev_ts` 已经是单调递增的微秒设备时间戳，直接写入 `ImageFrame::timestamp_us`。
-- 启动时读取 `DeviceTimestampIncrement` 只作为诊断日志输出，不参与换算；把它当作 `ns/tick`
-  会让当前 USB 设备的时间戳乘法溢出，并把帧周期放大数个数量级。
+- 当前 Hik USB 相机上 `DeviceTimestampIncrement` 表现为设备时间戳频率，例如
+  `100000000` 表示 `100MHz` tick。
+- 代码按 `dev_ts * 1000000 / DeviceTimestampIncrement` 换算到微秒，并用商/余数
+  分段计算避免 64 位乘法溢出。
+- 不能把 `DeviceTimestampIncrement` 当作 `ns/tick`；也不能直接把 100MHz `dev_ts`
+  当作微秒，否则帧周期会放大 100 倍。
 - 如果某一帧没有 `dev_ts`，该帧会被丢弃；不会用 `nHostTimeStamp` 或 `Timebase` 冒充传感器时间。
 - `nHostTimeStamp` 只在首帧日志中作为 SDK/主机侧对照信息输出，不参与同步。
 - 图像写入 `CameraBase` 槽位后立即提交；图像队列和同步关系由 `CameraFrameSync` 管。
@@ -46,5 +49,5 @@ CMake 必须在 `add_subdirectory(libxr)` 前打开
 没有 Hikrobot 相机和对应触发硬件时，只能做编译验证。实机验证需要确认：
 
 - 相机能稳定输出非零 `dev_ts`。
-- `dev_ts` 帧间差应与实际触发周期一致，例如 50fps 时约 20000us。
+- `ImageFrame::timestamp_us` 帧间差应与实际触发周期一致，例如 50fps 时约 20000us。
 - 外部触发信号与板端 IMU 采样策略匹配。
