@@ -13,6 +13,7 @@ constructor_args:
       external_trigger: true
       acquisition_frame_rate: 249.0
       grab_timeout_ms: 100
+      image_node_num: 3
 template_args:
   - Info:
       width: 1440
