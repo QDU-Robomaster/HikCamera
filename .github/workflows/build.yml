@@ -99,6 +99,14 @@ jobs:
         with:
           path: Modules/${{ env.XR_MODULE_NAME }}
 
+      - name: Pin CameraBase recording dependency
+        run: |
+          rm -rf Modules/CameraBase
+          git clone --depth=1 \
+            --branch codex/camerabase-internal-recording-20260506 \
+            https://github.com/QDU-Robomaster/CameraBase \
+            ./Modules/CameraBase
+
       - name: Create minimal module config
         run: |
           mkdir -p User

@@ -26,6 +26,7 @@ CMake 必须在 `add_subdirectory(libxr)` 前打开
 - 如果某一帧没有 `dev_ts`，该帧会被丢弃；不会用 `nHostTimeStamp` 或 `Timebase` 冒充传感器时间。
 - `nHostTimeStamp` 只在首帧日志中作为 SDK/主机侧对照信息输出，不参与同步。
 - 图像写入 `CameraBase` 槽位后立即提交；图像队列和同步关系由 `CameraFrameSync` 管。
+- 需要内录时，通过 `runtime.recording` 打开 `CameraBase` 生产者侧原始图像记录。
 
 ## 运行参数
 
