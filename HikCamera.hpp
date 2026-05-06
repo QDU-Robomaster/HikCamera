@@ -14,6 +14,7 @@ constructor_args:
       acquisition_frame_rate: 249.0
       grab_timeout_ms: 100
       image_node_num: 3
+      recording: {}
 template_args:
   - Info:
       width: 1440
@@ -61,6 +62,7 @@ class HikCamera : public LibXR::Application,
   using Self = HikCamera<CameraInfoV>;
   using Base = CameraBase<CameraInfoV>;
   using ImageFrame = typename Base::ImageFrame;
+  using RecordingParam = typename Base::RecordingParam;
 
   static inline constexpr auto camera_info = Base::camera_info;
   static constexpr int channel_count = 3;
@@ -90,12 +92,14 @@ class HikCamera : public LibXR::Application,
     float acquisition_frame_rate = 249.0F;  ///< 非外触发模式下的自由运行帧率。
     uint32_t grab_timeout_ms = 100;  ///< SDK 等待一帧图像的超时时间。
     uint32_t image_node_num = 3;  ///< SDK 内部取流缓存节点数。
+    RecordingParam recording{};  ///< CameraBase 生产者侧原始图像内录配置。
   };
 
   explicit HikCamera(LibXR::HardwareContainer& hw,
                      LibXR::ApplicationManager& app,
                      RuntimeParam runtime)
-      : Base(hw, runtime.camera_name, runtime.image_topic_name, runtime.imu_topic_name),
+      : Base(hw, runtime.camera_name, runtime.image_topic_name, runtime.imu_topic_name,
+             runtime.recording),
         runtime_(runtime)
   {
     runtime_.gain = ClampGain(runtime_.gain);
