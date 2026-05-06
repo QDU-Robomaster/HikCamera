@@ -14,6 +14,7 @@ constructor_args:
       acquisition_frame_rate: 249.0
       grab_timeout_ms: 100
       image_node_num: 3
+      rotate_180: false
 template_args:
   - Info:
       width: 1440
@@ -75,6 +76,10 @@ class HikCamera : public LibXR::Application,
                 "HikCamera expects tightly packed BGR8 frames");
   static_assert(Base::image_bytes <= std::numeric_limits<unsigned int>::max(),
                 "Hik SDK image buffer size is unsigned int");
+  static_assert(Base::image_bytes >= channel_count,
+                "HikCamera image buffer must contain at least one BGR pixel");
+  static_assert(Base::image_bytes % channel_count == 0,
+                "HikCamera expects complete BGR pixels");
 
   /**
    * @brief xrobot YAML 传入的运行时参数。
@@ -90,6 +95,7 @@ class HikCamera : public LibXR::Application,
     float acquisition_frame_rate = 249.0F;  ///< 非外触发模式下的自由运行帧率。
     uint32_t grab_timeout_ms = 100;  ///< SDK 等待一帧图像的超时时间。
     uint32_t image_node_num = 3;  ///< SDK 内部取流缓存节点数。
+    bool rotate_180 = false;  ///< true 时将发布图像原地旋转 180 度。
   };
 
   explicit HikCamera(LibXR::HardwareContainer& hw,
@@ -99,7 +105,8 @@ class HikCamera : public LibXR::Application,
         runtime_(runtime)
   {
     runtime_.gain = ClampGain(runtime_.gain);
-    XR_LOG_INFO("Starting HikCamera: external_trigger=%d", runtime_.external_trigger ? 1 : 0);
+    XR_LOG_INFO("Starting HikCamera: external_trigger=%d rotate_180=%d",
+                runtime_.external_trigger ? 1 : 0, runtime_.rotate_180 ? 1 : 0);
     if (CaptureStart() && StartGrabbing())
     {
       camera_state_.store(true);
@@ -255,10 +262,10 @@ class HikCamera : public LibXR::Application,
 
     ProbeDeviceTimestampFrequency();
 
-    XR_LOG_PASS("HikCamera configured: trigger=%s gain=%.3f exposure=%.3f us "
+    XR_LOG_PASS("HikCamera configured: trigger=%s rotate_180=%d gain=%.3f exposure=%.3f us "
                 "timestamp_freq_hz=%llu",
                 runtime_.external_trigger ? "external" : "freerun",
-                runtime_.gain, runtime_.exposure_time,
+                runtime_.rotate_180 ? 1 : 0, runtime_.gain, runtime_.exposure_time,
                 static_cast<unsigned long long>(device_timestamp_frequency_hz_));
     return true;
   }
@@ -350,6 +357,31 @@ class HikCamera : public LibXR::Application,
            (remainder * microseconds_per_second) / freq;
   }
 
+  static void RotateImage180(ImageFrame& image)
+  {
+    auto* data = image.data.data();
+    std::size_t left = 0;
+    std::size_t right = Base::image_bytes - channel_count;
+
+    while (left < right)
+    {
+      const auto b = data[left];
+      const auto g = data[left + 1];
+      const auto r = data[left + 2];
+
+      data[left] = data[right];
+      data[left + 1] = data[right + 1];
+      data[left + 2] = data[right + 2];
+
+      data[right] = b;
+      data[right + 1] = g;
+      data[right + 2] = r;
+
+      left += channel_count;
+      right -= channel_count;
+    }
+  }
+
   void LogFirstCommittedFrame(const MV_FRAME_OUT_INFO_EX& frame_info, uint64_t timestamp_us)
   {
     const uint64_t dev_ts =
@@ -402,7 +434,7 @@ class HikCamera : public LibXR::Application,
       }
 
       if (frame_info.nWidth != camera_info.width || frame_info.nHeight != camera_info.height ||
-          frame_info.nFrameLen > Base::image_bytes)
+          frame_info.nFrameLen != static_cast<unsigned int>(Base::image_bytes))
       {
         XR_LOG_ERROR("HikCamera frame geometry mismatch: %ux%u len=%u",
                      frame_info.nWidth, frame_info.nHeight, frame_info.nFrameLen);
@@ -415,6 +447,11 @@ class HikCamera : public LibXR::Application,
       {
         ++failure_count_;
         continue;
+      }
+
+      if (runtime_.rotate_180)
+      {
+        RotateImage180(*image);
       }
 
       image->timestamp_us = image_timestamp_us;
