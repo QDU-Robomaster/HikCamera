@@ -15,6 +15,7 @@ constructor_args:
       grab_timeout_ms: 100
       image_node_num: 3
       rotate_180: false
+      recording: {}
 template_args:
   - Info:
       width: 1440
@@ -62,6 +63,7 @@ class HikCamera : public LibXR::Application,
   using Self = HikCamera<CameraInfoV>;
   using Base = CameraBase<CameraInfoV>;
   using ImageFrame = typename Base::ImageFrame;
+  using RecordingParam = typename Base::RecordingParam;
 
   static inline constexpr auto camera_info = Base::camera_info;
   static constexpr int channel_count = 3;
@@ -96,12 +98,14 @@ class HikCamera : public LibXR::Application,
     uint32_t grab_timeout_ms = 100;  ///< SDK 等待一帧图像的超时时间。
     uint32_t image_node_num = 3;  ///< SDK 内部取流缓存节点数。
     bool rotate_180 = false;  ///< true 时将发布图像原地旋转 180 度。
+    RecordingParam recording{};  ///< CameraBase 生产者侧图像内录配置。
   };
 
   explicit HikCamera(LibXR::HardwareContainer& hw,
                      LibXR::ApplicationManager& app,
                      RuntimeParam runtime)
-      : Base(hw, runtime.camera_name, runtime.image_topic_name, runtime.imu_topic_name),
+      : Base(hw, runtime.camera_name, runtime.image_topic_name, runtime.imu_topic_name,
+             runtime.recording),
         runtime_(runtime)
   {
     runtime_.gain = ClampGain(runtime_.gain);
