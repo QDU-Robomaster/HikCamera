@@ -14,6 +14,8 @@ constructor_args:
       acquisition_frame_rate: 249.0
       grab_timeout_ms: 100
       image_node_num: 3
+      decimation_horizontal: 1
+      decimation_vertical: 1
       rotate_180: false
       recording: {}
 template_args:
@@ -98,6 +100,8 @@ class HikCamera : public LibXR::Application,
     float acquisition_frame_rate = 249.0F;  ///< 非外触发模式下的自由运行帧率。
     uint32_t grab_timeout_ms = 100;  ///< SDK 等待一帧图像的超时时间。
     uint32_t image_node_num = 3;  ///< SDK 内部取流缓存节点数。
+    uint32_t decimation_horizontal = 1;  ///< 横向下采样倍率；1 表示不启用。
+    uint32_t decimation_vertical = 1;  ///< 纵向下采样倍率；1 表示不启用。
     bool rotate_180 = false;  ///< true 时使用相机 ReverseX/Y 做 180 度旋转。
     RecordingParam recording{};  ///< CameraBase 生产者侧图像内录配置。
   };
@@ -203,6 +207,20 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  bool GetEnumValue(const char* name, MVCC_ENUMVALUE& value, bool required = true)
+  {
+    const auto ret = MV_CC_GetEnumValue(camera_handle_, name, &value);
+    if (ret != MV_OK)
+    {
+      if (required)
+      {
+        XR_LOG_ERROR("HikCamera MV_CC_GetEnumValue(%s) failed: %d", name, ret);
+      }
+      return false;
+    }
+    return true;
+  }
+
   bool GetBoolValue(const char* name, bool& value)
   {
     const auto ret = MV_CC_GetBoolValue(camera_handle_, name, &value);
@@ -275,6 +293,49 @@ class HikCamera : public LibXR::Application,
     return range.nMin + ((value - range.nMin) / range.nInc) * range.nInc;
   }
 
+  bool ConfigureDecimation()
+  {
+    if (runtime_.decimation_horizontal == 0 || runtime_.decimation_vertical == 0)
+    {
+      XR_LOG_ERROR("HikCamera decimation must be >= 1: horizontal=%u vertical=%u",
+                   runtime_.decimation_horizontal, runtime_.decimation_vertical);
+      return false;
+    }
+
+    MVCC_ENUMVALUE old_horizontal{};
+    MVCC_ENUMVALUE old_vertical{};
+    const bool wants_decimation = runtime_.decimation_horizontal != 1 ||
+                                  runtime_.decimation_vertical != 1;
+    const bool have_horizontal =
+        GetEnumValue("DecimationHorizontal", old_horizontal, wants_decimation);
+    const bool have_vertical =
+        GetEnumValue("DecimationVertical", old_vertical, wants_decimation);
+    if (!have_horizontal || !have_vertical)
+    {
+      if (wants_decimation)
+      {
+        XR_LOG_ERROR("HikCamera requested decimation %ux%u but camera nodes are unavailable",
+                     runtime_.decimation_horizontal, runtime_.decimation_vertical);
+        return false;
+      }
+      return true;
+    }
+
+    old_decimation_horizontal_ = old_horizontal.nCurValue;
+    old_decimation_vertical_ = old_vertical.nCurValue;
+    decimation_state_saved_ = true;
+
+    if (!SetEnumValue("DecimationHorizontal", runtime_.decimation_horizontal) ||
+        !SetEnumValue("DecimationVertical", runtime_.decimation_vertical))
+    {
+      return false;
+    }
+
+    XR_LOG_PASS("HikCamera decimation: horizontal=%u vertical=%u",
+                runtime_.decimation_horizontal, runtime_.decimation_vertical);
+    return true;
+  }
+
   bool ConfigureImageGeometry()
   {
     MVCC_INTVALUE_EX old_width{};
@@ -295,6 +356,8 @@ class HikCamera : public LibXR::Application,
     geometry_state_saved_ = true;
 
     if (!SetIntValue("OffsetX", 0) || !SetIntValue("OffsetY", 0) ||
+        !ConfigureDecimation() ||
+        !SetIntValue("OffsetX", 0) || !SetIntValue("OffsetY", 0) ||
         !GetIntValue("Width", full_width_range_) ||
         !GetIntValue("Height", full_height_range_))
     {
@@ -342,14 +405,15 @@ class HikCamera : public LibXR::Application,
       return false;
     }
 
-    XR_LOG_PASS("HikCamera image geometry: sensor=%lldx%lld roi=%lldx%lld "
-                "offset=%lld,%lld",
+    XR_LOG_PASS("HikCamera image geometry: max=%lldx%lld roi=%lldx%lld "
+                "offset=%lld,%lld decimation=%ux%u",
                 static_cast<long long>(full_width_range_.nMax),
                 static_cast<long long>(full_height_range_.nMax),
                 static_cast<long long>(target_width),
                 static_cast<long long>(target_height),
                 static_cast<long long>(offset_x),
-                static_cast<long long>(offset_y));
+                static_cast<long long>(offset_y),
+                runtime_.decimation_horizontal, runtime_.decimation_vertical);
     return true;
   }
 
@@ -362,6 +426,12 @@ class HikCamera : public LibXR::Application,
 
     (void)SetIntValue("OffsetX", 0);
     (void)SetIntValue("OffsetY", 0);
+    if (decimation_state_saved_)
+    {
+      (void)SetEnumValue("DecimationHorizontal", old_decimation_horizontal_);
+      (void)SetEnumValue("DecimationVertical", old_decimation_vertical_);
+      decimation_state_saved_ = false;
+    }
     (void)SetIntValue("Width", old_width_);
     (void)SetIntValue("Height", old_height_);
     (void)SetIntValue("OffsetX", old_offset_x_);
@@ -688,8 +758,11 @@ class HikCamera : public LibXR::Application,
   bool device_rotate_180_{false};
   bool reverse_state_saved_{false};
   bool geometry_state_saved_{false};
+  bool decimation_state_saved_{false};
   bool old_reverse_x_{false};
   bool old_reverse_y_{false};
+  uint32_t old_decimation_horizontal_{1};
+  uint32_t old_decimation_vertical_{1};
   int64_t old_width_{0};
   int64_t old_height_{0};
   int64_t old_offset_x_{0};

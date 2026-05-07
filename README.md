@@ -51,6 +51,12 @@ CMake 必须在 `add_subdirectory(libxr)` 前打开
 相机当前可用的最大图像尺寸，模块会设置居中 `OffsetX / OffsetY`，即使用相机侧
 ROI 直接输出目标尺寸；退出时恢复启动前的图像几何。
 
+`decimation_horizontal` / `decimation_vertical` 默认为 `1`，表示不启用相机下采样。
+当 BSP 显式设置为 `2` 等相机支持的枚举值时，模块会先配置
+`DecimationHorizontal / DecimationVertical`，再按 `CameraInfo` 配置
+`Width / Height / OffsetX / OffsetY`。因此使用下采样时，BSP 中的 `CameraInfo`
+必须描述下采样后的实际输出图像尺寸和内参。
+
 `rotate_180 = true` 用于修正倒装相机方向。模块会在开始取流前优先设置相机
 `ReverseX` 和 `ReverseY` 两个 boolean 节点；两者都成功时，旋转由相机侧完成。
 如果相机型号或当前配置不支持这两个节点，启动会失败，不再退回 host buffer 旋转。
