@@ -40,6 +40,7 @@ depends:
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "MvCameraControl.h"
 
@@ -114,9 +115,7 @@ class HikCamera : public LibXR::Application,
     if (CaptureStart() && StartGrabbing())
     {
       camera_state_.store(true);
-      capture_thread_.Create(this, CaptureThreadMain, "HikCapture",
-                             static_cast<size_t>(128 * 1024),
-                             LibXR::Thread::Priority::REALTIME);
+      capture_thread_ = std::thread(CaptureThreadMain, this);
       capture_thread_created_ = true;
     }
     else
@@ -130,9 +129,9 @@ class HikCamera : public LibXR::Application,
   ~HikCamera() override
   {
     camera_state_.store(false);
-    if (capture_thread_created_)
+    if (capture_thread_created_ && capture_thread_.joinable())
     {
-      pthread_join(static_cast<LibXR::libxr_thread_handle>(capture_thread_), nullptr);
+      capture_thread_.join();
       capture_thread_created_ = false;
     }
     CaptureStop();
@@ -480,7 +479,7 @@ class HikCamera : public LibXR::Application,
   RuntimeParam runtime_{};
   void* camera_handle_{nullptr};
   std::atomic<bool> camera_state_{false};
-  LibXR::Thread capture_thread_{};
+  std::thread capture_thread_{};
   bool capture_thread_created_{false};
   uint64_t device_timestamp_frequency_hz_{microseconds_per_second};
   uint32_t frames_committed_{0};
