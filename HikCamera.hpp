@@ -226,6 +226,149 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  bool GetIntValue(const char* name, MVCC_INTVALUE_EX& value)
+  {
+    const auto ret = MV_CC_GetIntValueEx(camera_handle_, name, &value);
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("HikCamera MV_CC_GetIntValueEx(%s) failed: %d", name, ret);
+      return false;
+    }
+    return true;
+  }
+
+  bool SetIntValue(const char* name, int64_t value)
+  {
+    const auto ret = MV_CC_SetIntValueEx(camera_handle_, name, value);
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("HikCamera MV_CC_SetIntValueEx(%s, %lld) failed: %d",
+                   name, static_cast<long long>(value), ret);
+      return false;
+    }
+    return true;
+  }
+
+  static bool IsIntegerValueAllowed(const MVCC_INTVALUE_EX& range, int64_t value)
+  {
+    if (value < range.nMin || value > range.nMax)
+    {
+      return false;
+    }
+    return range.nInc <= 1 || ((value - range.nMin) % range.nInc) == 0;
+  }
+
+  static int64_t AlignDown(int64_t value, const MVCC_INTVALUE_EX& range)
+  {
+    if (value < range.nMin)
+    {
+      value = range.nMin;
+    }
+    if (value > range.nMax)
+    {
+      value = range.nMax;
+    }
+    if (range.nInc <= 1)
+    {
+      return value;
+    }
+    return range.nMin + ((value - range.nMin) / range.nInc) * range.nInc;
+  }
+
+  bool ConfigureImageGeometry()
+  {
+    MVCC_INTVALUE_EX old_width{};
+    MVCC_INTVALUE_EX old_height{};
+    MVCC_INTVALUE_EX old_offset_x{};
+    MVCC_INTVALUE_EX old_offset_y{};
+    if (!GetIntValue("Width", old_width) || !GetIntValue("Height", old_height) ||
+        !GetIntValue("OffsetX", old_offset_x) ||
+        !GetIntValue("OffsetY", old_offset_y))
+    {
+      return false;
+    }
+
+    old_width_ = old_width.nCurValue;
+    old_height_ = old_height.nCurValue;
+    old_offset_x_ = old_offset_x.nCurValue;
+    old_offset_y_ = old_offset_y.nCurValue;
+    geometry_state_saved_ = true;
+
+    if (!SetIntValue("OffsetX", 0) || !SetIntValue("OffsetY", 0) ||
+        !GetIntValue("Width", full_width_range_) ||
+        !GetIntValue("Height", full_height_range_))
+    {
+      return false;
+    }
+
+    const int64_t target_width = static_cast<int64_t>(camera_info.width);
+    const int64_t target_height = static_cast<int64_t>(camera_info.height);
+    if (!IsIntegerValueAllowed(full_width_range_, target_width) ||
+        !IsIntegerValueAllowed(full_height_range_, target_height))
+    {
+      XR_LOG_ERROR("HikCamera image geometry invalid: target=%lldx%lld "
+                   "width_range=[%lld,%lld/%lld] height_range=[%lld,%lld/%lld]",
+                   static_cast<long long>(target_width),
+                   static_cast<long long>(target_height),
+                   static_cast<long long>(full_width_range_.nMin),
+                   static_cast<long long>(full_width_range_.nMax),
+                   static_cast<long long>(full_width_range_.nInc),
+                   static_cast<long long>(full_height_range_.nMin),
+                   static_cast<long long>(full_height_range_.nMax),
+                   static_cast<long long>(full_height_range_.nInc));
+      return false;
+    }
+
+    if (!SetIntValue("Width", target_width) ||
+        !SetIntValue("Height", target_height))
+    {
+      return false;
+    }
+
+    MVCC_INTVALUE_EX offset_x_range{};
+    MVCC_INTVALUE_EX offset_y_range{};
+    if (!GetIntValue("OffsetX", offset_x_range) ||
+        !GetIntValue("OffsetY", offset_y_range))
+    {
+      return false;
+    }
+
+    const int64_t offset_x =
+        AlignDown((full_width_range_.nMax - target_width) / 2, offset_x_range);
+    const int64_t offset_y =
+        AlignDown((full_height_range_.nMax - target_height) / 2, offset_y_range);
+    if (!SetIntValue("OffsetX", offset_x) || !SetIntValue("OffsetY", offset_y))
+    {
+      return false;
+    }
+
+    XR_LOG_PASS("HikCamera image geometry: sensor=%lldx%lld roi=%lldx%lld "
+                "offset=%lld,%lld",
+                static_cast<long long>(full_width_range_.nMax),
+                static_cast<long long>(full_height_range_.nMax),
+                static_cast<long long>(target_width),
+                static_cast<long long>(target_height),
+                static_cast<long long>(offset_x),
+                static_cast<long long>(offset_y));
+    return true;
+  }
+
+  void RestoreImageGeometry()
+  {
+    if (!geometry_state_saved_ || camera_handle_ == nullptr)
+    {
+      return;
+    }
+
+    (void)SetIntValue("OffsetX", 0);
+    (void)SetIntValue("OffsetY", 0);
+    (void)SetIntValue("Width", old_width_);
+    (void)SetIntValue("Height", old_height_);
+    (void)SetIntValue("OffsetX", old_offset_x_);
+    (void)SetIntValue("OffsetY", old_offset_y_);
+    geometry_state_saved_ = false;
+  }
+
   bool ConfigureRotation()
   {
     device_rotate_180_ = false;
@@ -306,6 +449,11 @@ class HikCamera : public LibXR::Application,
       return false;
     }
 
+    if (!ConfigureImageGeometry())
+    {
+      return false;
+    }
+
     ret = MV_CC_SetImageNodeNum(camera_handle_, runtime_.image_node_num);
     if (ret != MV_OK)
     {
@@ -376,6 +524,7 @@ class HikCamera : public LibXR::Application,
     }
     (void)MV_CC_StopGrabbing(camera_handle_);
     RestoreDeviceRotation();
+    RestoreImageGeometry();
     (void)MV_CC_CloseDevice(camera_handle_);
     (void)MV_CC_DestroyHandle(camera_handle_);
     camera_handle_ = nullptr;
@@ -538,8 +687,15 @@ class HikCamera : public LibXR::Application,
   bool capture_thread_created_{false};
   bool device_rotate_180_{false};
   bool reverse_state_saved_{false};
+  bool geometry_state_saved_{false};
   bool old_reverse_x_{false};
   bool old_reverse_y_{false};
+  int64_t old_width_{0};
+  int64_t old_height_{0};
+  int64_t old_offset_x_{0};
+  int64_t old_offset_y_{0};
+  MVCC_INTVALUE_EX full_width_range_{};
+  MVCC_INTVALUE_EX full_height_range_{};
   uint64_t device_timestamp_frequency_hz_{microseconds_per_second};
   uint32_t frames_committed_{0};
   uint32_t failure_count_{0};

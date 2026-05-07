@@ -47,12 +47,15 @@ CMake 必须在 `add_subdirectory(libxr)` 前打开
 
 关闭外部触发时，模块会配置 `AcquisitionFrameRate`，由相机自由运行。
 
+模块启动时会按模板参数 `CameraInfo` 配置相机 `Width / Height`。如果该尺寸小于
+相机当前可用的最大图像尺寸，模块会设置居中 `OffsetX / OffsetY`，即使用相机侧
+ROI 直接输出目标尺寸；退出时恢复启动前的图像几何。
+
 `rotate_180 = true` 用于修正倒装相机方向。模块会在开始取流前优先设置相机
 `ReverseX` 和 `ReverseY` 两个 boolean 节点；两者都成功时，旋转由相机侧完成。
-如果相机型号或当前配置不支持这两个节点，模块会恢复原节点值并退回到原有的
-host buffer 180 度旋转路径，保持输出方向语义不变。启动日志里的
-`rotate_mode` 会显示 `device_reverse_xy`、`host_buffer` 或 `none`。使用相机端
-旋转时，模块停止相机前会把 `ReverseX / ReverseY` 恢复到启动前读到的值。
+如果相机型号或当前配置不支持这两个节点，启动会失败，不再退回 host buffer 旋转。
+启动日志里的 `rotate_mode` 会显示 `device_reverse_xy` 或 `none`。使用相机端旋转时，
+模块停止相机前会把 `ReverseX / ReverseY` 恢复到启动前读到的值。
 
 ## 与 IMU 同步
 
