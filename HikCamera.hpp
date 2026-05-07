@@ -98,7 +98,7 @@ class HikCamera : public LibXR::Application,
     float acquisition_frame_rate = 249.0F;  ///< 非外触发模式下的自由运行帧率。
     uint32_t grab_timeout_ms = 100;  ///< SDK 等待一帧图像的超时时间。
     uint32_t image_node_num = 3;  ///< SDK 内部取流缓存节点数。
-    bool rotate_180 = false;  ///< true 时将发布图像原地旋转 180 度。
+    bool rotate_180 = false;  ///< true 时优先使用相机 ReverseX/Y 做 180 度旋转。
     RecordingParam recording{};  ///< CameraBase 生产者侧图像内录配置。
   };
 
@@ -203,6 +203,93 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  bool GetBoolValue(const char* name, bool& value)
+  {
+    const auto ret = MV_CC_GetBoolValue(camera_handle_, name, &value);
+    if (ret != MV_OK)
+    {
+      XR_LOG_WARN("HikCamera MV_CC_GetBoolValue(%s) failed: %d", name, ret);
+      return false;
+    }
+    return true;
+  }
+
+  bool SetBoolValue(const char* name, bool value)
+  {
+    const auto ret = MV_CC_SetBoolValue(camera_handle_, name, value);
+    if (ret != MV_OK)
+    {
+      XR_LOG_WARN("HikCamera MV_CC_SetBoolValue(%s, %d) failed: %d",
+                  name, value ? 1 : 0, ret);
+      return false;
+    }
+    return true;
+  }
+
+  void ConfigureRotation()
+  {
+    host_rotate_180_ = false;
+    device_rotate_180_ = false;
+    if (!runtime_.rotate_180)
+    {
+      return;
+    }
+
+    bool old_reverse_x = false;
+    bool old_reverse_y = false;
+    if (!GetBoolValue("ReverseX", old_reverse_x) ||
+        !GetBoolValue("ReverseY", old_reverse_y))
+    {
+      host_rotate_180_ = true;
+      XR_LOG_WARN("HikCamera falling back to host 180-degree rotation: "
+                  "camera ReverseX/ReverseY unavailable");
+      return;
+    }
+
+    old_reverse_x_ = old_reverse_x;
+    old_reverse_y_ = old_reverse_y;
+    reverse_state_saved_ = true;
+    if (SetBoolValue("ReverseX", true) && SetBoolValue("ReverseY", true))
+    {
+      device_rotate_180_ = true;
+      XR_LOG_PASS("HikCamera using camera ReverseX+ReverseY for 180-degree rotation");
+      return;
+    }
+
+    (void)SetBoolValue("ReverseX", old_reverse_x);
+    (void)SetBoolValue("ReverseY", old_reverse_y);
+    reverse_state_saved_ = false;
+    host_rotate_180_ = true;
+    XR_LOG_WARN("HikCamera falling back to host 180-degree rotation: "
+                "failed to enable both ReverseX and ReverseY");
+  }
+
+  const char* RotationModeName() const
+  {
+    if (device_rotate_180_)
+    {
+      return "device_reverse_xy";
+    }
+    if (host_rotate_180_)
+    {
+      return "host_buffer";
+    }
+    return "none";
+  }
+
+  void RestoreDeviceRotation()
+  {
+    if (!device_rotate_180_ || !reverse_state_saved_ || camera_handle_ == nullptr)
+    {
+      return;
+    }
+
+    (void)SetBoolValue("ReverseX", old_reverse_x_);
+    (void)SetBoolValue("ReverseY", old_reverse_y_);
+    device_rotate_180_ = false;
+    reverse_state_saved_ = false;
+  }
+
   bool CaptureStart()
   {
     MV_CC_DEVICE_INFO_LIST device_list{};
@@ -263,12 +350,14 @@ class HikCamera : public LibXR::Application,
       return false;
     }
 
+    ConfigureRotation();
     ProbeDeviceTimestampFrequency();
 
-    XR_LOG_PASS("HikCamera configured: trigger=%s rotate_180=%d gain=%.3f exposure=%.3f us "
-                "timestamp_freq_hz=%llu",
+    XR_LOG_PASS("HikCamera configured: trigger=%s rotate_180=%d rotate_mode=%s "
+                "gain=%.3f exposure=%.3f us timestamp_freq_hz=%llu",
                 runtime_.external_trigger ? "external" : "freerun",
-                runtime_.rotate_180 ? 1 : 0, runtime_.gain, runtime_.exposure_time,
+                runtime_.rotate_180 ? 1 : 0, RotationModeName(), runtime_.gain,
+                runtime_.exposure_time,
                 static_cast<unsigned long long>(device_timestamp_frequency_hz_));
     return true;
   }
@@ -291,6 +380,7 @@ class HikCamera : public LibXR::Application,
       return;
     }
     (void)MV_CC_StopGrabbing(camera_handle_);
+    RestoreDeviceRotation();
     (void)MV_CC_CloseDevice(camera_handle_);
     (void)MV_CC_DestroyHandle(camera_handle_);
     camera_handle_ = nullptr;
@@ -452,7 +542,7 @@ class HikCamera : public LibXR::Application,
         continue;
       }
 
-      if (runtime_.rotate_180)
+      if (host_rotate_180_)
       {
         RotateImage180(*image);
       }
@@ -481,6 +571,11 @@ class HikCamera : public LibXR::Application,
   std::atomic<bool> camera_state_{false};
   std::thread capture_thread_{};
   bool capture_thread_created_{false};
+  bool host_rotate_180_{false};
+  bool device_rotate_180_{false};
+  bool reverse_state_saved_{false};
+  bool old_reverse_x_{false};
+  bool old_reverse_y_{false};
   uint64_t device_timestamp_frequency_hz_{microseconds_per_second};
   uint32_t frames_committed_{0};
   uint32_t failure_count_{0};
