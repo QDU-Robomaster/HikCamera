@@ -1,78 +1,92 @@
 # HikCamera
 
-`HikCamera` 是 Hikrobot USB 相机采集模块。它继承 `CameraBase<Info>`，
-从相机 SDK 取 BGR8 图像，并通过 `CameraBase` 的共享图像槽位发布给后续视觉模块。
+HikCamera 从 Hikrobot USB 相机读取 BGR8 图像，并写入 `CameraBase<Info>`
+提供的图像槽。
 
-模块实现集中在 `HikCamera.hpp`。仓库内的 `hikSDK/include` 与 `hikSDK/lib`
-是构建所需的 Hikrobot SDK 头文件和动态库。
+本模块使用仓库内的 `hikSDK/include` 和 `hikSDK/lib` 构建。如果系统存在
+`/opt/MVS`，CMake 会优先使用系统安装的 Hikrobot SDK。
 
-## 构建边界
+## 相机信息
 
-模块日志会输出 `uint64_t` 传感器时间戳和 Hikrobot 时间戳。BSP 或 CI 的顶层
-CMake 必须在 `add_subdirectory(libxr)` 前打开
-`LIBXR_PRINT_INTEGER_ENABLE_64BIT`，模块 CMake 不修改 libxr print profile。
+模板参数 `Info` 必须描述相机实际输出图像：
+
+- `encoding` 必须是 `CameraTypes::Encoding::BGR8`
+- `step` 必须等于 `width * 3`
+- `width` 和 `height` 必须能被相机 SDK 接受
+- 使用下采样时，`Info` 写下采样后的图像尺寸和内参
+
+模块启动时会按 `Info.width` 和 `Info.height` 配置相机输出尺寸。目标尺寸小于
+相机可用最大尺寸时，模块会设置居中的 `OffsetX` 和 `OffsetY`。
 
 ## 时间戳
 
-发布到 `ImageFrame::timestamp_us` 的时间戳来自相机硬件，不使用主机到达时间。
+`ImageFrame::timestamp_us` 来自 Hikrobot 帧信息中的设备时间戳。
 
-- 原始硬件时间戳来自 SDK 帧信息里的 `nDevTimeStampHigh / nDevTimeStampLow`，代码中合成为 `dev_ts`。
-- 当前 Hik USB 相机上 `DeviceTimestampIncrement` 表现为设备时间戳频率，例如
-  `100000000` 表示 `100MHz` tick。
-- 代码按 `dev_ts * 1000000 / DeviceTimestampIncrement` 换算到微秒，并用商/余数
-  分段计算避免 64 位乘法溢出。
-- 不能把 `DeviceTimestampIncrement` 当作 `ns/tick`；也不能直接把 100MHz `dev_ts`
-  当作微秒，否则帧周期会放大 100 倍。
-- 如果某一帧没有 `dev_ts`，该帧会被丢弃；不会用 `nHostTimeStamp` 或 `Timebase` 冒充传感器时间。
-- `nHostTimeStamp` 只在首帧日志中作为 SDK/主机侧对照信息输出，不参与同步。
-- 图像写入 `CameraBase` 槽位后立即提交；图像队列和同步关系由 `CameraFrameSync` 管。
-- 需要内录或标定采集时，在 `CameraFrameSync` 后实例化 `VisionCapture`。
+代码读取：
+
+```text
+nDevTimeStampHigh
+nDevTimeStampLow
+DeviceTimestampIncrement
+```
+
+然后把设备 tick 换算成微秒。
+
+如果某一帧没有设备时间戳，该帧会被丢弃。`nHostTimeStamp` 只用于首帧日志，
+不会写入 `ImageFrame::timestamp_us`。
 
 ## 运行参数
 
-默认参数面向外部触发采集：
+`RuntimeParam` 字段：
 
-- `external_trigger = true`
-- `TriggerSource = Line0`
-- `TriggerActivation = RisingEdge`
-- `ExposureAuto = Off`
-- `GainAuto = Off`
-- `BalanceWhiteAuto = Continuous`
-- `exposure_time = 2000us`
-- `gain = 16`
-- `encoding = BGR8`
+- `camera_name`：相机实例名
+- `image_topic_name`：图像名称
+- `imu_topic_name`：同步 IMU 名称
+- `gain`：相机增益，最大值限制为 `16`
+- `exposure_time`：曝光时间，单位微秒
+- `external_trigger`：是否使用外触发
+- `acquisition_frame_rate`：自由运行帧率
+- `grab_timeout_ms`：SDK 等待一帧图像的超时时间
+- `image_node_num`：SDK 取流缓存节点数
+- `decimation_horizontal`：横向下采样倍率，`1` 表示不下采样
+- `decimation_vertical`：纵向下采样倍率，`1` 表示不下采样
+- `rotate_180`：是否使用相机 `ReverseX` 和 `ReverseY` 旋转图像
 
-`gain` 会被限制到 `16`，运行时调用 `SetGain()` 传入更大值时会打印警告并按
-`16` 下发给 SDK。
+`external_trigger = true` 时使用：
 
-关闭外部触发时，模块会配置 `AcquisitionFrameRate`，由相机自由运行。
+```text
+TriggerMode = On
+TriggerSource = Line0
+TriggerActivation = RisingEdge
+```
 
-模块启动时会按模板参数 `CameraInfo` 配置相机 `Width / Height`。如果该尺寸小于
-相机当前可用的最大图像尺寸，模块会设置居中 `OffsetX / OffsetY`，即使用相机侧
-ROI 直接输出目标尺寸；退出时恢复启动前的图像几何。
+`external_trigger = false` 时关闭触发，并配置 `AcquisitionFrameRate`。
 
-`decimation_horizontal` / `decimation_vertical` 默认为 `1`，表示不启用相机下采样。
-当 BSP 显式设置为 `2` 等相机支持的枚举值时，模块会先配置
-`DecimationHorizontal / DecimationVertical`，再按 `CameraInfo` 配置
-`Width / Height / OffsetX / OffsetY`。因此使用下采样时，BSP 中的 `CameraInfo`
-必须描述下采样后的实际输出图像尺寸和内参。
+## 图像旋转
 
-`rotate_180 = true` 用于修正倒装相机方向。模块会在开始取流前优先设置相机
-`ReverseX` 和 `ReverseY` 两个 boolean 节点；两者都成功时，旋转由相机侧完成。
-如果相机型号或当前配置不支持这两个节点，启动会失败，不再退回 host buffer 旋转。
-启动日志里的 `rotate_mode` 会显示 `device_reverse_xy` 或 `none`。使用相机端旋转时，
-模块停止相机前会把 `ReverseX / ReverseY` 恢复到启动前读到的值。
+`rotate_180 = true` 时，模块会设置相机的 `ReverseX` 和 `ReverseY`。
 
-## 与 IMU 同步
+如果相机不支持这两个节点，启动失败。模块不会在主机侧旋转图像。
 
-本模块只发布图像，不发布伪 IMU，也不响应 `sensor_sync_cmd`。
-实机链路中的 `camera_gyro / camera_accl / camera_quat` 由板端或 IMU 侧发布，
-图像与 IMU 的同步由后级同步模块完成。
+停止相机时，模块会恢复启动前的 `ReverseX` 和 `ReverseY`。
 
-## 验证边界
+## 图像写入
 
-没有 Hikrobot 相机和对应触发硬件时，只能做编译验证。实机验证需要确认：
+采集线程流程：
 
-- 相机能稳定输出非零 `dev_ts`。
-- `ImageFrame::timestamp_us` 帧间差应与实际触发周期一致，例如 50fps 时约 20000us。
-- 外部触发信号与板端 IMU 采样策略匹配。
+1. 等待图像槽可用
+2. 调用 `MV_CC_GetImageForBGR`
+3. 检查图像宽高和字节数
+4. 写入 `ImageFrame::timestamp_us`
+5. 调用 `CommitImage()`
+
+如果图像槽还没有注册，采集线程会等待并定期打印日志。
+
+## 命令
+
+继承自 `CameraBase` 的 RamFS 命令可用于调整曝光和增益：
+
+```text
+set_exposure <微秒>
+set_gain <值>
+```

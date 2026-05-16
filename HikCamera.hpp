@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: Hikrobot USB 相机采集模块，按 CameraBase 图像槽位合约发布图像
+module_description: Hikrobot USB 相机采集模块，向 CameraBase 图像槽写入图像
 constructor_args:
   - runtime:
       camera_name: "camera"
@@ -54,23 +54,31 @@ depends:
 /**
  * @brief Hikrobot USB 相机采集模块。
  *
- * 本模块只发布图像：像素写入 `CameraBase` 图像槽位，时间戳来自相机 SDK
- * 的设备时间戳。IMU 原始数据和同步命令由板端/同步模块负责。
+ * 本模块从 Hikrobot SDK 读取 BGR8 图像，写入 `CameraBase` 当前可写图像槽。
+ * `ImageFrame::timestamp_us` 使用相机设备时间戳换算得到的微秒值。
+ *
+ * @tparam CameraInfoV 相机输出图像尺寸、像素格式和内参。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 class HikCamera : public LibXR::Application,
                   public CameraBase<CameraInfoV>
 {
  public:
-  using Self = HikCamera<CameraInfoV>;
-  using Base = CameraBase<CameraInfoV>;
-  using ImageFrame = typename Base::ImageFrame;
+  using Self = HikCamera<CameraInfoV>;          ///< 当前模板实例类型。
+  using Base = CameraBase<CameraInfoV>;         ///< CameraBase 基类类型。
+  using ImageFrame = typename Base::ImageFrame; ///< 图像槽载荷类型。
 
+  /// 编译期相机信息。
   static inline constexpr auto camera_info = Base::camera_info;
+  /// Hik SDK 当前取图路径固定输出 BGR 三通道。
   static constexpr int channel_count = 3;
+  /// 每行字节数。
   static constexpr std::size_t frame_step = static_cast<std::size_t>(camera_info.step);
+  /// 一秒对应的微秒数。
   static constexpr uint64_t microseconds_per_second = 1000000ULL;
+  /// 等待图像槽时的日志周期。
   static constexpr uint32_t image_sink_wait_log_ms = 1000;
+  /// 当前实机使用的增益上限。
   static constexpr float max_gain = 16.0F;
 
   static_assert(camera_info.encoding == CameraTypes::Encoding::BGR8,
@@ -103,6 +111,15 @@ class HikCamera : public LibXR::Application,
     bool rotate_180 = false;  ///< true 时使用相机 ReverseX/Y 做 180 度旋转。
   };
 
+  /**
+   * @brief 打开相机、配置参数并启动采集线程。
+   *
+   * @param hw 硬件容器，传给 `CameraBase` 注册 RamFS 命令。
+   * @param app 应用管理器。
+   * @param runtime 运行时相机参数。
+   *
+   * 配置或开始取流失败时会抛出 `std::runtime_error`。
+   */
   explicit HikCamera(LibXR::HardwareContainer& hw,
                      LibXR::ApplicationManager& app,
                      RuntimeParam runtime)
@@ -126,6 +143,9 @@ class HikCamera : public LibXR::Application,
     app.Register(*this);
   }
 
+  /**
+   * @brief 停止采集线程，关闭相机并恢复启动前保存的相机设置。
+   */
   ~HikCamera() override
   {
     camera_state_.store(false);
@@ -156,6 +176,9 @@ class HikCamera : public LibXR::Application,
   }
 
  private:
+  /**
+   * @brief 把增益限制在当前配置允许的范围内。
+   */
   static float ClampGain(float gain)
   {
     if (gain > max_gain)
@@ -167,6 +190,9 @@ class HikCamera : public LibXR::Application,
     return gain;
   }
 
+  /**
+   * @brief 写入 Hik SDK float 节点。
+   */
   bool SetFloatValue(const char* name, double value)
   {
     const auto ret = MV_CC_SetFloatValue(camera_handle_, name, static_cast<float>(value));
@@ -179,6 +205,9 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 写入 Hik SDK enum 节点。
+   */
   bool SetEnumValue(const char* name, unsigned int value)
   {
     const auto ret = MV_CC_SetEnumValue(camera_handle_, name, value);
@@ -191,6 +220,9 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 用字符串写入 Hik SDK enum 节点。
+   */
   bool SetEnumValueByString(const char* name, const char* value)
   {
     const auto ret = MV_CC_SetEnumValueByString(camera_handle_, name, value);
@@ -203,6 +235,9 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 读取 Hik SDK enum 节点。
+   */
   bool GetEnumValue(const char* name, MVCC_ENUMVALUE& value, bool required = true)
   {
     const auto ret = MV_CC_GetEnumValue(camera_handle_, name, &value);
@@ -217,6 +252,9 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 读取 Hik SDK bool 节点。
+   */
   bool GetBoolValue(const char* name, bool& value)
   {
     const auto ret = MV_CC_GetBoolValue(camera_handle_, name, &value);
@@ -228,6 +266,9 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 写入 Hik SDK bool 节点。
+   */
   bool SetBoolValue(const char* name, bool value)
   {
     const auto ret = MV_CC_SetBoolValue(camera_handle_, name, value);
@@ -240,6 +281,9 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 读取 Hik SDK integer 节点。
+   */
   bool GetIntValue(const char* name, MVCC_INTVALUE_EX& value)
   {
     const auto ret = MV_CC_GetIntValueEx(camera_handle_, name, &value);
@@ -251,6 +295,9 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 写入 Hik SDK integer 节点。
+   */
   bool SetIntValue(const char* name, int64_t value)
   {
     const auto ret = MV_CC_SetIntValueEx(camera_handle_, name, value);
@@ -289,6 +336,11 @@ class HikCamera : public LibXR::Application,
     return range.nMin + ((value - range.nMin) / range.nInc) * range.nInc;
   }
 
+  /**
+   * @brief 配置相机下采样倍率。
+   *
+   * `1x1` 表示不下采样。请求其它倍率时，相机必须提供对应 SDK 节点。
+   */
   bool ConfigureDecimation()
   {
     if (runtime_.decimation_horizontal == 0 || runtime_.decimation_vertical == 0)
@@ -332,6 +384,11 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 按 `CameraInfoV` 配置输出图像尺寸和居中 ROI。
+   *
+   * 配置前会保存启动时的宽高、偏移和下采样设置，关闭相机时恢复。
+   */
   bool ConfigureImageGeometry()
   {
     MVCC_INTVALUE_EX old_width{};
@@ -413,6 +470,9 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 恢复启动前保存的图像尺寸、偏移和下采样设置。
+   */
   void RestoreImageGeometry()
   {
     if (!geometry_state_saved_ || camera_handle_ == nullptr)
@@ -435,6 +495,11 @@ class HikCamera : public LibXR::Application,
     geometry_state_saved_ = false;
   }
 
+  /**
+   * @brief 配置 180 度图像旋转。
+   *
+   * 旋转通过相机 `ReverseX` 和 `ReverseY` 节点完成。请求旋转但节点不可用时启动失败。
+   */
   bool ConfigureRotation()
   {
     device_rotate_180_ = false;
@@ -469,6 +534,9 @@ class HikCamera : public LibXR::Application,
     return false;
   }
 
+  /**
+   * @brief 返回当前旋转方式名称，用于启动日志。
+   */
   const char* RotationModeName() const
   {
     if (device_rotate_180_)
@@ -478,6 +546,9 @@ class HikCamera : public LibXR::Application,
     return "none";
   }
 
+  /**
+   * @brief 恢复启动前保存的 `ReverseX` 和 `ReverseY` 设置。
+   */
   void RestoreDeviceRotation()
   {
     if (!device_rotate_180_ || !reverse_state_saved_ || camera_handle_ == nullptr)
@@ -491,6 +562,9 @@ class HikCamera : public LibXR::Application,
     reverse_state_saved_ = false;
   }
 
+  /**
+   * @brief 枚举 USB 相机、打开设备并配置采集参数。
+   */
   bool CaptureStart()
   {
     MV_CC_DEVICE_INFO_LIST device_list{};
@@ -571,6 +645,9 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 开始 Hik SDK 取流。
+   */
   bool StartGrabbing()
   {
     const auto ret = MV_CC_StartGrabbing(camera_handle_);
@@ -582,6 +659,9 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 停止取流、恢复相机设置并销毁 SDK handle。
+   */
   void CaptureStop()
   {
     if (camera_handle_ == nullptr)
@@ -596,6 +676,9 @@ class HikCamera : public LibXR::Application,
     camera_handle_ = nullptr;
   }
 
+  /**
+   * @brief 下发当前曝光和增益设置。
+   */
   void UpdateParameters()
   {
     if (camera_handle_ == nullptr)
@@ -606,6 +689,11 @@ class HikCamera : public LibXR::Application,
     (void)SetFloatValue("Gain", runtime_.gain);
   }
 
+  /**
+   * @brief 读取设备时间戳频率。
+   *
+   * 读取失败时按微秒 tick 处理，并打印警告。
+   */
   void ProbeDeviceTimestampFrequency()
   {
     MVCC_INTVALUE_EX value{};
@@ -623,6 +711,11 @@ class HikCamera : public LibXR::Application,
                 static_cast<unsigned long long>(device_timestamp_frequency_hz_));
   }
 
+  /**
+   * @brief 从 SDK 帧信息计算图像时间戳，单位微秒。
+   *
+   * 没有设备时间戳的帧会被拒绝。
+   */
   [[nodiscard]] bool ResolveImageTimestampUs(const MV_FRAME_OUT_INFO_EX& frame_info,
                                              uint64_t& timestamp_us)
   {
@@ -641,11 +734,17 @@ class HikCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 合并 Hik SDK 提供的高低 32 位时间戳。
+   */
   static uint64_t CombineU32(uint32_t high, uint32_t low)
   {
     return (static_cast<uint64_t>(high) << 32U) | static_cast<uint64_t>(low);
   }
 
+  /**
+   * @brief 把设备 tick 换算成微秒。
+   */
   uint64_t DeviceTicksToUs(uint64_t dev_ts) const
   {
     const uint64_t freq = device_timestamp_frequency_hz_;
@@ -660,6 +759,9 @@ class HikCamera : public LibXR::Application,
            (remainder * microseconds_per_second) / freq;
   }
 
+  /**
+   * @brief 打印首帧时间戳和 SDK 帧号信息。
+   */
   void LogFirstCommittedFrame(const MV_FRAME_OUT_INFO_EX& frame_info, uint64_t timestamp_us)
   {
     const uint64_t dev_ts =
@@ -675,6 +777,9 @@ class HikCamera : public LibXR::Application,
                 frame_info.nLostPacket);
   }
 
+  /**
+   * @brief 等待其它模块注册图像槽。
+   */
   void WaitForImageSink()
   {
     uint32_t waited_ms = 0;
@@ -689,6 +794,9 @@ class HikCamera : public LibXR::Application,
     }
   }
 
+  /**
+   * @brief 采集循环：取图、检查尺寸、写时间戳并提交图像。
+   */
   void CaptureLoop()
   {
     WaitForImageSink();
@@ -743,29 +851,32 @@ class HikCamera : public LibXR::Application,
     }
   }
 
+  /**
+   * @brief `std::thread` 入口。
+   */
   static void CaptureThreadMain(Self* self) { self->CaptureLoop(); }
 
  private:
-  RuntimeParam runtime_{};
-  void* camera_handle_{nullptr};
-  std::atomic<bool> camera_state_{false};
-  std::thread capture_thread_{};
-  bool capture_thread_created_{false};
-  bool device_rotate_180_{false};
-  bool reverse_state_saved_{false};
-  bool geometry_state_saved_{false};
-  bool decimation_state_saved_{false};
-  bool old_reverse_x_{false};
-  bool old_reverse_y_{false};
-  uint32_t old_decimation_horizontal_{1};
-  uint32_t old_decimation_vertical_{1};
-  int64_t old_width_{0};
-  int64_t old_height_{0};
-  int64_t old_offset_x_{0};
-  int64_t old_offset_y_{0};
-  MVCC_INTVALUE_EX full_width_range_{};
-  MVCC_INTVALUE_EX full_height_range_{};
-  uint64_t device_timestamp_frequency_hz_{microseconds_per_second};
-  uint32_t frames_committed_{0};
-  uint32_t failure_count_{0};
+  RuntimeParam runtime_{};  ///< 当前运行参数快照。
+  void* camera_handle_{nullptr};  ///< Hik SDK 设备 handle。
+  std::atomic<bool> camera_state_{false};  ///< 采集线程运行标志。
+  std::thread capture_thread_{};  ///< 采集线程。
+  bool capture_thread_created_{false};  ///< 线程是否已创建。
+  bool device_rotate_180_{false};  ///< 当前是否由相机完成 180 度旋转。
+  bool reverse_state_saved_{false};  ///< 是否保存过 ReverseX / ReverseY 原值。
+  bool geometry_state_saved_{false};  ///< 是否保存过宽高和偏移原值。
+  bool decimation_state_saved_{false};  ///< 是否保存过下采样原值。
+  bool old_reverse_x_{false};  ///< 启动前的 ReverseX。
+  bool old_reverse_y_{false};  ///< 启动前的 ReverseY。
+  uint32_t old_decimation_horizontal_{1};  ///< 启动前的横向下采样。
+  uint32_t old_decimation_vertical_{1};  ///< 启动前的纵向下采样。
+  int64_t old_width_{0};  ///< 启动前的宽度。
+  int64_t old_height_{0};  ///< 启动前的高度。
+  int64_t old_offset_x_{0};  ///< 启动前的 X 偏移。
+  int64_t old_offset_y_{0};  ///< 启动前的 Y 偏移。
+  MVCC_INTVALUE_EX full_width_range_{};  ///< 相机支持的宽度范围。
+  MVCC_INTVALUE_EX full_height_range_{};  ///< 相机支持的高度范围。
+  uint64_t device_timestamp_frequency_hz_{microseconds_per_second};  ///< 设备时间戳频率。
+  uint32_t frames_committed_{0};  ///< 已提交帧数。
+  uint32_t failure_count_{0};  ///< 失败帧数。
 };
