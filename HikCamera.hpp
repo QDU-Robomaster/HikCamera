@@ -17,7 +17,6 @@ constructor_args:
       decimation_horizontal: 1
       decimation_vertical: 1
       rotate_180: false
-      recording: {}
 template_args:
   - Info:
       width: 1440
@@ -66,7 +65,6 @@ class HikCamera : public LibXR::Application,
   using Self = HikCamera<CameraInfoV>;
   using Base = CameraBase<CameraInfoV>;
   using ImageFrame = typename Base::ImageFrame;
-  using RecordingParam = typename Base::RecordingParam;
 
   static inline constexpr auto camera_info = Base::camera_info;
   static constexpr int channel_count = 3;
@@ -103,14 +101,12 @@ class HikCamera : public LibXR::Application,
     uint32_t decimation_horizontal = 1;  ///< 横向下采样倍率；1 表示不启用。
     uint32_t decimation_vertical = 1;  ///< 纵向下采样倍率；1 表示不启用。
     bool rotate_180 = false;  ///< true 时使用相机 ReverseX/Y 做 180 度旋转。
-    RecordingParam recording{};  ///< CameraBase 生产者侧图像内录配置。
   };
 
   explicit HikCamera(LibXR::HardwareContainer& hw,
                      LibXR::ApplicationManager& app,
                      RuntimeParam runtime)
-      : Base(hw, runtime.camera_name, runtime.image_topic_name, runtime.imu_topic_name,
-             runtime.recording),
+      : Base(hw, runtime.camera_name, runtime.image_topic_name, runtime.imu_topic_name),
         runtime_(runtime)
   {
     runtime_.gain = ClampGain(runtime_.gain);
