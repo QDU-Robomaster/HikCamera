@@ -51,6 +51,8 @@ DeviceTimestampIncrement
 - `decimation_horizontal`：横向下采样倍率，`1` 表示不下采样
 - `decimation_vertical`：纵向下采样倍率，`1` 表示不下采样
 - `rotate_180`：是否使用相机 `ReverseX` 和 `ReverseY` 旋转图像
+- `gamma_enabled`：是否设置相机硬件 User Gamma；`false` 时不改动相机 Gamma 节点
+- `gamma`：硬件 User Gamma 值，Hik SDK 范围为 `[0.1, 4.0]`
 
 `external_trigger = true` 时使用：
 
@@ -69,6 +71,19 @@ TriggerActivation = RisingEdge
 如果相机不支持这两个节点，启动失败。模块不会在主机侧旋转图像。
 
 停止相机时，模块会恢复启动前的 `ReverseX` 和 `ReverseY`。
+
+## 硬件 Gamma
+
+`gamma_enabled = true` 时，模块会设置：
+
+```text
+GammaSelector = User
+Gamma = <gamma>
+```
+
+如果相机不支持 `GammaSelector` 或 `Gamma` 节点，启动失败并打印 SDK 错误码。
+停止相机时，模块会恢复启动前的 `GammaSelector`；如果启动前就是 `User`，
+同时恢复启动前的 `Gamma` 值。
 
 ## 图像写入
 

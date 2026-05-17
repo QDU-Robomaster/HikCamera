@@ -17,6 +17,8 @@ constructor_args:
       decimation_horizontal: 1
       decimation_vertical: 1
       rotate_180: false
+      gamma_enabled: false
+      gamma: 1.0
 template_args:
   - Info:
       width: 1440
@@ -36,6 +38,7 @@ depends:
 // clang-format on
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -80,6 +83,12 @@ class HikCamera : public LibXR::Application,
   static constexpr uint32_t image_sink_wait_log_ms = 1000;
   /// 当前实机使用的增益上限。
   static constexpr float max_gain = 16.0F;
+  /// Hik SDK 文档给出的 Gamma 值范围下限。
+  static constexpr float min_gamma = 0.1F;
+  /// Hik SDK 文档给出的 Gamma 值范围上限。
+  static constexpr float max_gamma = 4.0F;
+  /// 不启用 Gamma 时保留相机启动前节点状态。
+  static constexpr float neutral_gamma = 1.0F;
 
   static_assert(camera_info.encoding == CameraTypes::Encoding::BGR8,
                 "HikCamera publishes BGR8 frames through MV_CC_GetImageForBGR");
@@ -109,6 +118,8 @@ class HikCamera : public LibXR::Application,
     uint32_t decimation_horizontal = 1;  ///< 横向下采样倍率；1 表示不启用。
     uint32_t decimation_vertical = 1;  ///< 纵向下采样倍率；1 表示不启用。
     bool rotate_180 = false;  ///< true 时使用相机 ReverseX/Y 做 180 度旋转。
+    bool gamma_enabled = false;  ///< true 时设置相机 User Gamma。
+    float gamma = neutral_gamma;  ///< User Gamma 值，Hik SDK 范围为 [0.1, 4.0]。
   };
 
   /**
@@ -127,8 +138,11 @@ class HikCamera : public LibXR::Application,
         runtime_(runtime)
   {
     runtime_.gain = ClampGain(runtime_.gain);
-    XR_LOG_INFO("Starting HikCamera: external_trigger=%d rotate_180=%d",
-                runtime_.external_trigger ? 1 : 0, runtime_.rotate_180 ? 1 : 0);
+    runtime_.gamma = ClampGamma(runtime_.gamma);
+    XR_LOG_INFO("Starting HikCamera: external_trigger=%d rotate_180=%d "
+                "gamma_enabled=%d gamma=%.3f",
+                runtime_.external_trigger ? 1 : 0, runtime_.rotate_180 ? 1 : 0,
+                runtime_.gamma_enabled ? 1 : 0, static_cast<double>(runtime_.gamma));
     if (CaptureStart() && StartGrabbing())
     {
       camera_state_.store(true);
@@ -188,6 +202,32 @@ class HikCamera : public LibXR::Application,
       return max_gain;
     }
     return gain;
+  }
+
+  /**
+   * @brief 把 Gamma 限制在 Hik SDK 支持的范围内。
+   */
+  static float ClampGamma(float gamma)
+  {
+    if (!std::isfinite(gamma))
+    {
+      XR_LOG_WARN("HikCamera gamma is not finite; using %.3f",
+                  static_cast<double>(neutral_gamma));
+      return neutral_gamma;
+    }
+    if (gamma < min_gamma)
+    {
+      XR_LOG_WARN("HikCamera gamma %.3f below min %.3f; clamping",
+                  static_cast<double>(gamma), static_cast<double>(min_gamma));
+      return min_gamma;
+    }
+    if (gamma > max_gamma)
+    {
+      XR_LOG_WARN("HikCamera gamma %.3f exceeds max %.3f; clamping",
+                  static_cast<double>(gamma), static_cast<double>(max_gamma));
+      return max_gamma;
+    }
+    return gamma;
   }
 
   /**
@@ -563,6 +603,90 @@ class HikCamera : public LibXR::Application,
   }
 
   /**
+   * @brief 按需配置相机硬件 User Gamma。
+   *
+   * `gamma_enabled=false` 时不改动相机 Gamma 节点。开启后会保存启动前的
+   * GammaSelector，并在关闭相机时恢复。
+   */
+  bool ConfigureGamma()
+  {
+    gamma_state_saved_ = false;
+    old_gamma_value_saved_ = false;
+    if (!runtime_.gamma_enabled)
+    {
+      return true;
+    }
+
+    MVCC_ENUMVALUE old_selector{};
+    auto ret = MV_CC_GetGammaSelector(camera_handle_, &old_selector);
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("HikCamera gamma_enabled requires GammaSelector: %d", ret);
+      return false;
+    }
+
+    old_gamma_selector_ = old_selector.nCurValue;
+    gamma_state_saved_ = true;
+    if (old_gamma_selector_ == MV_GAMMA_SELECTOR_USER)
+    {
+      MVCC_FLOATVALUE old_gamma{};
+      ret = MV_CC_GetGamma(camera_handle_, &old_gamma);
+      if (ret == MV_OK)
+      {
+        old_gamma_ = old_gamma.fCurValue;
+        old_gamma_value_saved_ = true;
+      }
+      else
+      {
+        XR_LOG_WARN("HikCamera MV_CC_GetGamma failed while saving old value: %d",
+                    ret);
+      }
+    }
+
+    ret = MV_CC_SetGammaSelector(camera_handle_, MV_GAMMA_SELECTOR_USER);
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("HikCamera MV_CC_SetGammaSelector(User) failed: %d", ret);
+      return false;
+    }
+
+    ret = MV_CC_SetGamma(camera_handle_, runtime_.gamma);
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("HikCamera MV_CC_SetGamma(%.3f) failed: %d",
+                   static_cast<double>(runtime_.gamma), ret);
+      return false;
+    }
+
+    XR_LOG_PASS("HikCamera hardware gamma enabled: selector=User gamma=%.3f",
+                static_cast<double>(runtime_.gamma));
+    return true;
+  }
+
+  /**
+   * @brief 恢复启动前保存的 GammaSelector 和 User Gamma。
+   */
+  void RestoreGamma()
+  {
+    if (!gamma_state_saved_ || camera_handle_ == nullptr)
+    {
+      return;
+    }
+
+    if (old_gamma_selector_ == MV_GAMMA_SELECTOR_USER)
+    {
+      (void)MV_CC_SetGammaSelector(camera_handle_, MV_GAMMA_SELECTOR_USER);
+      if (old_gamma_value_saved_)
+      {
+        (void)MV_CC_SetGamma(camera_handle_, old_gamma_);
+      }
+    }
+    (void)MV_CC_SetGammaSelector(camera_handle_, old_gamma_selector_);
+    gamma_state_saved_ = false;
+    old_gamma_value_saved_ = false;
+  }
+
+  /**
    * @brief 枚举 USB 相机、打开设备并配置采集参数。
    */
   bool CaptureStart()
@@ -630,6 +754,11 @@ class HikCamera : public LibXR::Application,
       return false;
     }
 
+    if (!ConfigureGamma())
+    {
+      return false;
+    }
+
     if (!ConfigureRotation())
     {
       return false;
@@ -637,10 +766,13 @@ class HikCamera : public LibXR::Application,
     ProbeDeviceTimestampFrequency();
 
     XR_LOG_PASS("HikCamera configured: trigger=%s rotate_180=%d rotate_mode=%s "
-                "gain=%.3f exposure=%.3f us timestamp_freq_hz=%llu",
+                "gain=%.3f exposure=%.3f us gamma=%s gamma_value=%.3f "
+                "timestamp_freq_hz=%llu",
                 runtime_.external_trigger ? "external" : "freerun",
                 runtime_.rotate_180 ? 1 : 0, RotationModeName(), runtime_.gain,
                 runtime_.exposure_time,
+                runtime_.gamma_enabled ? "user" : "unchanged",
+                static_cast<double>(runtime_.gamma),
                 static_cast<unsigned long long>(device_timestamp_frequency_hz_));
     return true;
   }
@@ -669,6 +801,7 @@ class HikCamera : public LibXR::Application,
       return;
     }
     (void)MV_CC_StopGrabbing(camera_handle_);
+    RestoreGamma();
     RestoreDeviceRotation();
     RestoreImageGeometry();
     (void)MV_CC_CloseDevice(camera_handle_);
@@ -864,10 +997,14 @@ class HikCamera : public LibXR::Application,
   bool capture_thread_created_{false};  ///< 线程是否已创建。
   bool device_rotate_180_{false};  ///< 当前是否由相机完成 180 度旋转。
   bool reverse_state_saved_{false};  ///< 是否保存过 ReverseX / ReverseY 原值。
+  bool gamma_state_saved_{false};  ///< 是否保存过 GammaSelector 原值。
+  bool old_gamma_value_saved_{false};  ///< 是否保存过启动前 User Gamma 值。
   bool geometry_state_saved_{false};  ///< 是否保存过宽高和偏移原值。
   bool decimation_state_saved_{false};  ///< 是否保存过下采样原值。
   bool old_reverse_x_{false};  ///< 启动前的 ReverseX。
   bool old_reverse_y_{false};  ///< 启动前的 ReverseY。
+  uint32_t old_gamma_selector_{MV_GAMMA_SELECTOR_USER};  ///< 启动前的 GammaSelector。
+  float old_gamma_{neutral_gamma};  ///< 启动前的 User Gamma。
   uint32_t old_decimation_horizontal_{1};  ///< 启动前的横向下采样。
   uint32_t old_decimation_vertical_{1};  ///< 启动前的纵向下采样。
   int64_t old_width_{0};  ///< 启动前的宽度。
