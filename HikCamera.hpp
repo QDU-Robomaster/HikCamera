@@ -800,7 +800,6 @@ class HikCamera : public LibXR::Application,
   void CaptureLoop()
   {
     WaitForImageSink();
-    uint32_t software_frame_div_counter = 0;
     while (camera_state_.load())
     {
       ImageFrame* image = this->GetWritableImage();
@@ -833,12 +832,6 @@ class HikCamera : public LibXR::Application,
       if (!ResolveImageTimestampUs(frame_info, image_timestamp_us))
       {
         ++failure_count_;
-        continue;
-      }
-
-      ++software_frame_div_counter;
-      if ((software_frame_div_counter & 1U) != 0U)
-      {
         continue;
       }
 
