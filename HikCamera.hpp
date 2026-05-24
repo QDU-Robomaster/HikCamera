@@ -622,12 +622,27 @@ class HikCamera : public LibXR::Application,
     }
 
     if (!SetEnumValue("BalanceWhiteAuto", MV_BALANCEWHITE_AUTO_CONTINUOUS) ||
+        !SetEnumValue("PixelFormat", PixelType_Gvsp_BayerRG8) ||
         !SetEnumValue("ExposureAuto", MV_EXPOSURE_AUTO_MODE_OFF) ||
         !SetEnumValue("GainAuto", MV_GAIN_MODE_OFF) ||
         !SetFloatValue("ExposureTime", runtime_.exposure_time) ||
         !SetFloatValue("Gain", runtime_.gain))
     {
       return false;
+    }
+
+    MVCC_ENUMVALUE adc_bit_depth{};
+    if (GetEnumValue("ADCBitDepth", adc_bit_depth, false))
+    {
+      XR_LOG_INFO("HikCamera current ADCBitDepth=%u", adc_bit_depth.nCurValue);
+      if (!SetEnumValue("ADCBitDepth", 0))
+      {
+        return false;
+      }
+    }
+    else
+    {
+      XR_LOG_WARN("HikCamera ADCBitDepth unavailable; keep device default");
     }
 
     if (!ConfigureRotation())
