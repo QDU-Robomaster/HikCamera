@@ -1,22 +1,26 @@
 # HikCamera
 
-HikCamera 从 Hikrobot USB 相机读取 BGR8 图像，并写入 `CameraBase<Info>`
+HikCamera 从 Hikrobot USB 相机读取 BGR8 图像，并写入 `CameraBase<FrameLayoutV>`
 提供的图像槽。
 
 本模块使用仓库内的 `hikSDK/include` 和 `hikSDK/lib` 构建。如果系统存在
 `/opt/MVS`，CMake 会优先使用系统安装的 Hikrobot SDK。
 
-## 相机信息
+## 布局与标定
 
-模板参数 `Info` 必须描述相机实际输出图像：
+模板参数 `FrameLayoutV` 只描述固定的帧存储布局：
 
 - `encoding` 必须是 `CameraTypes::Encoding::BGR8`
 - `step` 必须等于 `width * 3`
 - `width` 和 `height` 必须能被相机 SDK 接受
-- 使用下采样时，`Info` 写下采样后的图像尺寸和内参
 
-模块启动时会按 `Info.width` 和 `Info.height` 配置相机输出尺寸。目标尺寸小于
-相机可用最大尺寸时，模块会设置居中的 `OffsetX` 和 `OffsetY`。
+构造参数 `CameraCalibration` 保存原生传感器坐标系下的一份固定内参。当前实现只支持
+固定 wide 模式：模块先应用 `decimation_horizontal / decimation_vertical`，再要求 SDK
+读回的最大输出尺寸与 `FrameLayoutV` 一致、偏移为零，且还原后的原生尺寸与标定尺寸一致。
+
+启动时模块从 SDK 读回尺寸、偏移、下采样和 `ReverseX / ReverseY`，生成固定
+`FrameGeometry`。采集线程在每次 `CommitImage()` 前把它复制到 `ImageFrame::geometry`。
+动态 ROI 切换不属于当前实现。
 
 ## 时间戳
 
@@ -77,7 +81,7 @@ TriggerActivation = RisingEdge
 1. 等待图像槽可用
 2. 调用 `MV_CC_GetImageForBGR`
 3. 检查图像宽高和字节数
-4. 写入 `ImageFrame::timestamp_us`
+4. 写入 `ImageFrame::timestamp_us` 和 `ImageFrame::geometry`
 5. 调用 `CommitImage()`
 
 如果图像槽还没有注册，采集线程会等待并定期打印日志。

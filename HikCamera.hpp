@@ -4,6 +4,14 @@
 /* === MODULE MANIFEST V2 ===
 module_description: Hikrobot USB 相机采集模块，向 CameraBase 图像槽写入图像
 constructor_args:
+  - calibration:
+      native_width: 1440
+      native_height: 1080
+      camera_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 1.0]
+      distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
+      distortion_coefficients: [-0.091821039187099038, 0.46399073468302049, 0.0026098786426372819, 0.0009819586010405485, -0.47512788503104569]
+      rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+      projection_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 0.0, 1.0, 0.0]
   - runtime:
       camera_name: "camera"
       image_topic_name: "camera_image"
@@ -14,20 +22,15 @@ constructor_args:
       acquisition_frame_rate: 249.0
       grab_timeout_ms: 100
       image_node_num: 3
-      decimation_horizontal: 1
-      decimation_vertical: 1
+      decimation_horizontal: 2
+      decimation_vertical: 2
       rotate_180: false
 template_args:
-  - Info:
-      width: 1440
-      height: 1080
-      step: 4320
+  - Layout:
+      width: 720
+      height: 540
+      step: 2160
       encoding: CameraTypes::Encoding::BGR8
-      camera_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 1.0]
-      distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
-      distortion_coefficients: [-0.091821039187099038, 0.46399073468302049, 0.0026098786426372819, 0.0009819586010405485, -0.47512788503104569]
-      rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-      projection_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 0.0, 1.0, 0.0]
 required_hardware:
   - Hikrobot USB camera
 depends:
@@ -43,9 +46,8 @@ depends:
 #include <string_view>
 #include <thread>
 
-#include "MvCameraControl.h"
-
 #include "CameraBase.hpp"
+#include "MvCameraControl.h"
 #include "app_framework.hpp"
 #include "libxr.hpp"
 #include "logger.hpp"
@@ -57,23 +59,24 @@ depends:
  * 本模块从 Hikrobot SDK 读取 BGR8 图像，写入 `CameraBase` 当前可写图像槽。
  * `ImageFrame::timestamp_us` 使用相机设备时间戳换算得到的微秒值。
  *
- * @tparam CameraInfoV 相机输出图像尺寸、像素格式和内参。
+ * @tparam FrameLayoutV 相机输出图像的固定存储容量和像素格式。
  */
-template <CameraTypes::CameraInfo CameraInfoV>
-class HikCamera : public LibXR::Application,
-                  public CameraBase<CameraInfoV>
+template <CameraTypes::FrameLayout FrameLayoutV>
+class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 {
  public:
-  using Self = HikCamera<CameraInfoV>;          ///< 当前模板实例类型。
-  using Base = CameraBase<CameraInfoV>;         ///< CameraBase 基类类型。
-  using ImageFrame = typename Base::ImageFrame; ///< 图像槽载荷类型。
+  using Self = HikCamera<FrameLayoutV>;                        ///< 当前模板实例类型。
+  using Base = CameraBase<FrameLayoutV>;                       ///< CameraBase 基类类型。
+  using ImageFrame = typename Base::ImageFrame;                ///< 图像槽载荷类型。
+  using CameraCalibration = typename Base::CameraCalibration;  ///< 原生相机标定。
+  using FrameGeometry = typename Base::FrameGeometry;          ///< 逐帧采样几何。
 
-  /// 编译期相机信息。
-  static inline constexpr auto camera_info = Base::camera_info;
+  /// 编译期帧存储布局。
+  static inline constexpr auto frame_layout = Base::frame_layout;
   /// Hik SDK 当前取图路径固定输出 BGR 三通道。
   static constexpr int channel_count = 3;
   /// 每行字节数。
-  static constexpr std::size_t frame_step = static_cast<std::size_t>(camera_info.step);
+  static constexpr std::size_t frame_step = static_cast<std::size_t>(frame_layout.step);
   /// 一秒对应的微秒数。
   static constexpr uint64_t microseconds_per_second = 1000000ULL;
   /// 等待图像槽时的日志周期。
@@ -81,9 +84,10 @@ class HikCamera : public LibXR::Application,
   /// 当前实机使用的增益上限。
   static constexpr float max_gain = 16.0F;
 
-  static_assert(camera_info.encoding == CameraTypes::Encoding::BGR8,
+  static_assert(frame_layout.encoding == CameraTypes::Encoding::BGR8,
                 "HikCamera publishes BGR8 frames through MV_CC_GetImageForBGR");
-  static_assert(frame_step == static_cast<std::size_t>(camera_info.width) * channel_count,
+  static_assert(frame_step ==
+                    static_cast<std::size_t>(frame_layout.width) * channel_count,
                 "HikCamera expects tightly packed BGR8 frames");
   static_assert(Base::image_bytes <= std::numeric_limits<unsigned int>::max(),
                 "Hik SDK image buffer size is unsigned int");
@@ -97,17 +101,17 @@ class HikCamera : public LibXR::Application,
    */
   struct RuntimeParam
   {
-    std::string_view camera_name = "camera";  ///< CameraBase 相机名。
+    std::string_view camera_name = "camera";             ///< CameraBase 相机名。
     std::string_view image_topic_name = "camera_image";  ///< 图像共享话题名。
-    std::string_view imu_topic_name = "camera_imu";  ///< 同步后 IMU 话题名。
-    float gain = 16.0F;  ///< 相机增益。
-    float exposure_time = 2000.0F;  ///< 曝光时间，单位微秒。
-    bool external_trigger = true;  ///< true 时使用 Line0 上升沿外触发。
+    std::string_view imu_topic_name = "camera_imu";      ///< 同步后 IMU 话题名。
+    float gain = 16.0F;                                  ///< 相机增益。
+    float exposure_time = 2000.0F;                       ///< 曝光时间，单位微秒。
+    bool external_trigger = true;           ///< true 时使用 Line0 上升沿外触发。
     float acquisition_frame_rate = 249.0F;  ///< 非外触发模式下的自由运行帧率。
-    uint32_t grab_timeout_ms = 100;  ///< SDK 等待一帧图像的超时时间。
-    uint32_t image_node_num = 3;  ///< SDK 内部取流缓存节点数。
-    uint32_t decimation_horizontal = 1;  ///< 横向下采样倍率；1 表示不启用。
-    uint32_t decimation_vertical = 1;  ///< 纵向下采样倍率；1 表示不启用。
+    uint32_t grab_timeout_ms = 100;         ///< SDK 等待一帧图像的超时时间。
+    uint32_t image_node_num = 3;            ///< SDK 内部取流缓存节点数。
+    uint32_t decimation_horizontal = 1;     ///< 横向下采样倍率；1 表示不启用。
+    uint32_t decimation_vertical = 1;       ///< 纵向下采样倍率；1 表示不启用。
     bool rotate_180 = false;  ///< true 时使用相机 ReverseX/Y 做 180 度旋转。
   };
 
@@ -116,14 +120,15 @@ class HikCamera : public LibXR::Application,
    *
    * @param hw 硬件容器，传给 `CameraBase` 注册 RamFS 命令。
    * @param app 应用管理器。
+   * @param calibration 原生传感器坐标系下的相机标定。
    * @param runtime 运行时相机参数。
    *
    * 配置或开始取流失败时会抛出 `std::runtime_error`。
    */
-  explicit HikCamera(LibXR::HardwareContainer& hw,
-                     LibXR::ApplicationManager& app,
-                     RuntimeParam runtime)
-      : Base(hw, runtime.camera_name, runtime.image_topic_name, runtime.imu_topic_name),
+  explicit HikCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
+                     CameraCalibration calibration, RuntimeParam runtime)
+      : Base(hw, calibration, runtime.camera_name, runtime.image_topic_name,
+             runtime.imu_topic_name),
         runtime_(runtime)
   {
     runtime_.gain = ClampGain(runtime_.gain);
@@ -159,8 +164,8 @@ class HikCamera : public LibXR::Application,
 
   void OnMonitor() override
   {
-    XR_LOG_INFO("HikCamera monitor: frames=%u failures=%u",
-                frames_committed_, failure_count_);
+    XR_LOG_INFO("HikCamera monitor: frames=%u failures=%u", frames_committed_,
+                failure_count_);
   }
 
   void SetExposure(double exposure) override
@@ -198,8 +203,8 @@ class HikCamera : public LibXR::Application,
     const auto ret = MV_CC_SetFloatValue(camera_handle_, name, static_cast<float>(value));
     if (ret != MV_OK)
     {
-      XR_LOG_ERROR("HikCamera MV_CC_SetFloatValue(%s, %.3f) failed: %d",
-                   name, value, ret);
+      XR_LOG_ERROR("HikCamera MV_CC_SetFloatValue(%s, %.3f) failed: %d", name, value,
+                   ret);
       return false;
     }
     return true;
@@ -213,8 +218,7 @@ class HikCamera : public LibXR::Application,
     const auto ret = MV_CC_SetEnumValue(camera_handle_, name, value);
     if (ret != MV_OK)
     {
-      XR_LOG_ERROR("HikCamera MV_CC_SetEnumValue(%s, %u) failed: %d",
-                   name, value, ret);
+      XR_LOG_ERROR("HikCamera MV_CC_SetEnumValue(%s, %u) failed: %d", name, value, ret);
       return false;
     }
     return true;
@@ -228,8 +232,8 @@ class HikCamera : public LibXR::Application,
     const auto ret = MV_CC_SetEnumValueByString(camera_handle_, name, value);
     if (ret != MV_OK)
     {
-      XR_LOG_ERROR("HikCamera MV_CC_SetEnumValueByString(%s, %s) failed: %d",
-                   name, value, ret);
+      XR_LOG_ERROR("HikCamera MV_CC_SetEnumValueByString(%s, %s) failed: %d", name, value,
+                   ret);
       return false;
     }
     return true;
@@ -274,8 +278,8 @@ class HikCamera : public LibXR::Application,
     const auto ret = MV_CC_SetBoolValue(camera_handle_, name, value);
     if (ret != MV_OK)
     {
-      XR_LOG_WARN("HikCamera MV_CC_SetBoolValue(%s, %d) failed: %d",
-                  name, value ? 1 : 0, ret);
+      XR_LOG_WARN("HikCamera MV_CC_SetBoolValue(%s, %d) failed: %d", name, value ? 1 : 0,
+                  ret);
       return false;
     }
     return true;
@@ -303,8 +307,8 @@ class HikCamera : public LibXR::Application,
     const auto ret = MV_CC_SetIntValueEx(camera_handle_, name, value);
     if (ret != MV_OK)
     {
-      XR_LOG_ERROR("HikCamera MV_CC_SetIntValueEx(%s, %lld) failed: %d",
-                   name, static_cast<long long>(value), ret);
+      XR_LOG_ERROR("HikCamera MV_CC_SetIntValueEx(%s, %lld) failed: %d", name,
+                   static_cast<long long>(value), ret);
       return false;
     }
     return true;
@@ -352,8 +356,8 @@ class HikCamera : public LibXR::Application,
 
     MVCC_ENUMVALUE old_horizontal{};
     MVCC_ENUMVALUE old_vertical{};
-    const bool wants_decimation = runtime_.decimation_horizontal != 1 ||
-                                  runtime_.decimation_vertical != 1;
+    const bool wants_decimation =
+        runtime_.decimation_horizontal != 1 || runtime_.decimation_vertical != 1;
     const bool have_horizontal =
         GetEnumValue("DecimationHorizontal", old_horizontal, wants_decimation);
     const bool have_vertical =
@@ -362,10 +366,13 @@ class HikCamera : public LibXR::Application,
     {
       if (wants_decimation)
       {
-        XR_LOG_ERROR("HikCamera requested decimation %ux%u but camera nodes are unavailable",
-                     runtime_.decimation_horizontal, runtime_.decimation_vertical);
+        XR_LOG_ERROR(
+            "HikCamera requested decimation %ux%u but camera nodes are unavailable",
+            runtime_.decimation_horizontal, runtime_.decimation_vertical);
         return false;
       }
+      applied_decimation_horizontal_ = 1;
+      applied_decimation_vertical_ = 1;
       return true;
     }
 
@@ -379,13 +386,32 @@ class HikCamera : public LibXR::Application,
       return false;
     }
 
+    MVCC_ENUMVALUE applied_horizontal{};
+    MVCC_ENUMVALUE applied_vertical{};
+    if (!GetEnumValue("DecimationHorizontal", applied_horizontal) ||
+        !GetEnumValue("DecimationVertical", applied_vertical) ||
+        applied_horizontal.nCurValue != runtime_.decimation_horizontal ||
+        applied_vertical.nCurValue != runtime_.decimation_vertical ||
+        applied_horizontal.nCurValue > std::numeric_limits<uint16_t>::max() ||
+        applied_vertical.nCurValue > std::numeric_limits<uint16_t>::max())
+    {
+      XR_LOG_ERROR(
+          "HikCamera decimation readback mismatch: requested=%ux%u "
+          "applied=%ux%u",
+          runtime_.decimation_horizontal, runtime_.decimation_vertical,
+          applied_horizontal.nCurValue, applied_vertical.nCurValue);
+      return false;
+    }
+    applied_decimation_horizontal_ = applied_horizontal.nCurValue;
+    applied_decimation_vertical_ = applied_vertical.nCurValue;
+
     XR_LOG_PASS("HikCamera decimation: horizontal=%u vertical=%u",
-                runtime_.decimation_horizontal, runtime_.decimation_vertical);
+                applied_decimation_horizontal_, applied_decimation_vertical_);
     return true;
   }
 
   /**
-   * @brief 按 `CameraInfoV` 配置输出图像尺寸和居中 ROI。
+   * @brief 按 `FrameLayoutV` 配置输出图像尺寸和居中 ROI。
    *
    * 配置前会保存启动时的宽高、偏移和下采样设置，关闭相机时恢复。
    */
@@ -396,8 +422,7 @@ class HikCamera : public LibXR::Application,
     MVCC_INTVALUE_EX old_offset_x{};
     MVCC_INTVALUE_EX old_offset_y{};
     if (!GetIntValue("Width", old_width) || !GetIntValue("Height", old_height) ||
-        !GetIntValue("OffsetX", old_offset_x) ||
-        !GetIntValue("OffsetY", old_offset_y))
+        !GetIntValue("OffsetX", old_offset_x) || !GetIntValue("OffsetY", old_offset_y))
     {
       return false;
     }
@@ -409,34 +434,34 @@ class HikCamera : public LibXR::Application,
     geometry_state_saved_ = true;
 
     if (!SetIntValue("OffsetX", 0) || !SetIntValue("OffsetY", 0) ||
-        !ConfigureDecimation() ||
-        !SetIntValue("OffsetX", 0) || !SetIntValue("OffsetY", 0) ||
-        !GetIntValue("Width", full_width_range_) ||
+        !ConfigureDecimation() || !SetIntValue("OffsetX", 0) ||
+        !SetIntValue("OffsetY", 0) || !GetIntValue("Width", full_width_range_) ||
         !GetIntValue("Height", full_height_range_))
     {
       return false;
     }
 
-    const int64_t target_width = static_cast<int64_t>(camera_info.width);
-    const int64_t target_height = static_cast<int64_t>(camera_info.height);
+    const int64_t target_width = static_cast<int64_t>(frame_layout.width);
+    const int64_t target_height = static_cast<int64_t>(frame_layout.height);
     if (!IsIntegerValueAllowed(full_width_range_, target_width) ||
-        !IsIntegerValueAllowed(full_height_range_, target_height))
+        !IsIntegerValueAllowed(full_height_range_, target_height) ||
+        target_width != full_width_range_.nMax ||
+        target_height != full_height_range_.nMax)
     {
-      XR_LOG_ERROR("HikCamera image geometry invalid: target=%lldx%lld "
-                   "width_range=[%lld,%lld/%lld] height_range=[%lld,%lld/%lld]",
-                   static_cast<long long>(target_width),
-                   static_cast<long long>(target_height),
-                   static_cast<long long>(full_width_range_.nMin),
-                   static_cast<long long>(full_width_range_.nMax),
-                   static_cast<long long>(full_width_range_.nInc),
-                   static_cast<long long>(full_height_range_.nMin),
-                   static_cast<long long>(full_height_range_.nMax),
-                   static_cast<long long>(full_height_range_.nInc));
+      XR_LOG_ERROR(
+          "HikCamera fixed-wide geometry invalid: target=%lldx%lld "
+          "width_range=[%lld,%lld/%lld] height_range=[%lld,%lld/%lld]",
+          static_cast<long long>(target_width), static_cast<long long>(target_height),
+          static_cast<long long>(full_width_range_.nMin),
+          static_cast<long long>(full_width_range_.nMax),
+          static_cast<long long>(full_width_range_.nInc),
+          static_cast<long long>(full_height_range_.nMin),
+          static_cast<long long>(full_height_range_.nMax),
+          static_cast<long long>(full_height_range_.nInc));
       return false;
     }
 
-    if (!SetIntValue("Width", target_width) ||
-        !SetIntValue("Height", target_height))
+    if (!SetIntValue("Width", target_width) || !SetIntValue("Height", target_height))
     {
       return false;
     }
@@ -458,15 +483,72 @@ class HikCamera : public LibXR::Application,
       return false;
     }
 
-    XR_LOG_PASS("HikCamera image geometry: max=%lldx%lld roi=%lldx%lld "
-                "offset=%lld,%lld decimation=%ux%u",
-                static_cast<long long>(full_width_range_.nMax),
-                static_cast<long long>(full_height_range_.nMax),
-                static_cast<long long>(target_width),
-                static_cast<long long>(target_height),
-                static_cast<long long>(offset_x),
-                static_cast<long long>(offset_y),
-                runtime_.decimation_horizontal, runtime_.decimation_vertical);
+    MVCC_INTVALUE_EX applied_width{};
+    MVCC_INTVALUE_EX applied_height{};
+    MVCC_INTVALUE_EX applied_offset_x{};
+    MVCC_INTVALUE_EX applied_offset_y{};
+    if (!GetIntValue("Width", applied_width) || !GetIntValue("Height", applied_height) ||
+        !GetIntValue("OffsetX", applied_offset_x) ||
+        !GetIntValue("OffsetY", applied_offset_y) ||
+        applied_width.nCurValue != target_width ||
+        applied_height.nCurValue != target_height || applied_offset_x.nCurValue != 0 ||
+        applied_offset_y.nCurValue != 0)
+    {
+      XR_LOG_ERROR(
+          "HikCamera fixed-wide geometry readback mismatch: "
+          "size=%lldx%lld offset=%lld,%lld",
+          static_cast<long long>(applied_width.nCurValue),
+          static_cast<long long>(applied_height.nCurValue),
+          static_cast<long long>(applied_offset_x.nCurValue),
+          static_cast<long long>(applied_offset_y.nCurValue));
+      return false;
+    }
+
+    const uint64_t native_width =
+        static_cast<uint64_t>(applied_width.nCurValue) * applied_decimation_horizontal_;
+    const uint64_t native_height =
+        static_cast<uint64_t>(applied_height.nCurValue) * applied_decimation_vertical_;
+    const auto& calibration = this->Calibration();
+    if (native_width != calibration.native_width ||
+        native_height != calibration.native_height)
+    {
+      XR_LOG_ERROR(
+          "HikCamera calibration/native geometry mismatch: applied=%llux%llu "
+          "calibration=%ux%u",
+          static_cast<unsigned long long>(native_width),
+          static_cast<unsigned long long>(native_height), calibration.native_width,
+          calibration.native_height);
+      return false;
+    }
+
+    frame_geometry_ = {
+        .epoch = 1,
+        .width = static_cast<uint32_t>(applied_width.nCurValue),
+        .height = static_cast<uint32_t>(applied_height.nCurValue),
+        .step = frame_layout.step,
+        .roi_offset_x_native = 0,
+        .roi_offset_y_native = 0,
+        .decimation_x = static_cast<uint16_t>(applied_decimation_horizontal_),
+        .decimation_y = static_cast<uint16_t>(applied_decimation_vertical_),
+        .flags = CameraTypes::FRAME_GEOMETRY_NONE,
+        .reserved = 0,
+        .sample_phase_x_native = 0.0F,
+        .sample_phase_y_native = 0.0F,
+    };
+    if (!CameraTypes::ValidateFrameGeometry(frame_layout, calibration, frame_geometry_))
+    {
+      XR_LOG_ERROR("HikCamera generated invalid fixed-wide FrameGeometry");
+      return false;
+    }
+
+    XR_LOG_PASS(
+        "HikCamera image geometry: max=%lldx%lld roi=%lldx%lld "
+        "offset=%lld,%lld decimation=%ux%u",
+        static_cast<long long>(full_width_range_.nMax),
+        static_cast<long long>(full_height_range_.nMax),
+        static_cast<long long>(target_width), static_cast<long long>(target_height),
+        static_cast<long long>(offset_x), static_cast<long long>(offset_y),
+        applied_decimation_horizontal_, applied_decimation_vertical_);
     return true;
   }
 
@@ -503,18 +585,23 @@ class HikCamera : public LibXR::Application,
   bool ConfigureRotation()
   {
     device_rotate_180_ = false;
-    if (!runtime_.rotate_180)
-    {
-      return true;
-    }
-
     bool old_reverse_x = false;
     bool old_reverse_y = false;
     if (!GetBoolValue("ReverseX", old_reverse_x) ||
         !GetBoolValue("ReverseY", old_reverse_y))
     {
-      XR_LOG_ERROR("HikCamera rotate_180 requires camera ReverseX/ReverseY");
+      XR_LOG_ERROR("HikCamera requires readable ReverseX/ReverseY geometry state");
       return false;
+    }
+
+    if (!runtime_.rotate_180)
+    {
+      frame_geometry_.flags =
+          (old_reverse_x ? CameraTypes::FRAME_GEOMETRY_REVERSE_X : 0U) |
+          (old_reverse_y ? CameraTypes::FRAME_GEOMETRY_REVERSE_Y : 0U);
+      XR_LOG_INFO("HikCamera retained device rotation state: reverse_x=%d reverse_y=%d",
+                  old_reverse_x ? 1 : 0, old_reverse_y ? 1 : 0);
+      return true;
     }
 
     old_reverse_x_ = old_reverse_x;
@@ -522,9 +609,18 @@ class HikCamera : public LibXR::Application,
     reverse_state_saved_ = true;
     if (SetBoolValue("ReverseX", true) && SetBoolValue("ReverseY", true))
     {
-      device_rotate_180_ = true;
-      XR_LOG_PASS("HikCamera using camera ReverseX+ReverseY for 180-degree rotation");
-      return true;
+      bool applied_reverse_x = false;
+      bool applied_reverse_y = false;
+      if (GetBoolValue("ReverseX", applied_reverse_x) &&
+          GetBoolValue("ReverseY", applied_reverse_y) && applied_reverse_x &&
+          applied_reverse_y)
+      {
+        device_rotate_180_ = true;
+        frame_geometry_.flags =
+            CameraTypes::FRAME_GEOMETRY_REVERSE_X | CameraTypes::FRAME_GEOMETRY_REVERSE_Y;
+        XR_LOG_PASS("HikCamera using camera ReverseX+ReverseY for 180-degree rotation");
+        return true;
+      }
     }
 
     (void)SetBoolValue("ReverseX", old_reverse_x);
@@ -539,9 +635,21 @@ class HikCamera : public LibXR::Application,
    */
   const char* RotationModeName() const
   {
-    if (device_rotate_180_)
+    const bool reverse_x = CameraTypes::HasGeometryFlag(
+        frame_geometry_, CameraTypes::FRAME_GEOMETRY_REVERSE_X);
+    const bool reverse_y = CameraTypes::HasGeometryFlag(
+        frame_geometry_, CameraTypes::FRAME_GEOMETRY_REVERSE_Y);
+    if (reverse_x && reverse_y)
     {
       return "device_reverse_xy";
+    }
+    if (reverse_x)
+    {
+      return "device_reverse_x";
+    }
+    if (reverse_y)
+    {
+      return "device_reverse_y";
     }
     return "none";
   }
@@ -571,8 +679,8 @@ class HikCamera : public LibXR::Application,
     auto ret = MV_CC_EnumDevices(MV_USB_DEVICE, &device_list);
     if (ret != MV_OK || device_list.nDeviceNum == 0)
     {
-      XR_LOG_ERROR("HikCamera no USB camera found: ret=%d count=%u",
-                   ret, device_list.nDeviceNum);
+      XR_LOG_ERROR("HikCamera no USB camera found: ret=%d count=%u", ret,
+                   device_list.nDeviceNum);
       return false;
     }
 
@@ -636,12 +744,12 @@ class HikCamera : public LibXR::Application,
     }
     ProbeDeviceTimestampFrequency();
 
-    XR_LOG_PASS("HikCamera configured: trigger=%s rotate_180=%d rotate_mode=%s "
-                "gain=%.3f exposure=%.3f us timestamp_freq_hz=%llu",
-                runtime_.external_trigger ? "external" : "freerun",
-                runtime_.rotate_180 ? 1 : 0, RotationModeName(), runtime_.gain,
-                runtime_.exposure_time,
-                static_cast<unsigned long long>(device_timestamp_frequency_hz_));
+    XR_LOG_PASS(
+        "HikCamera configured: trigger=%s rotate_180=%d rotate_mode=%s "
+        "gain=%.3f exposure=%.3f us timestamp_freq_hz=%llu",
+        runtime_.external_trigger ? "external" : "freerun", runtime_.rotate_180 ? 1 : 0,
+        RotationModeName(), runtime_.gain, runtime_.exposure_time,
+        static_cast<unsigned long long>(device_timestamp_frequency_hz_));
     return true;
   }
 
@@ -697,7 +805,8 @@ class HikCamera : public LibXR::Application,
   void ProbeDeviceTimestampFrequency()
   {
     MVCC_INTVALUE_EX value{};
-    const auto ret = MV_CC_GetIntValueEx(camera_handle_, "DeviceTimestampIncrement", &value);
+    const auto ret =
+        MV_CC_GetIntValueEx(camera_handle_, "DeviceTimestampIncrement", &value);
     if (ret == MV_OK && value.nCurValue > 0)
     {
       device_timestamp_frequency_hz_ = static_cast<uint64_t>(value.nCurValue);
@@ -705,10 +814,11 @@ class HikCamera : public LibXR::Application,
     }
 
     device_timestamp_frequency_hz_ = microseconds_per_second;
-    XR_LOG_WARN("HikCamera DeviceTimestampIncrement unavailable: ret=%d value=%lld, "
-                "assume %llu Hz",
-                ret, static_cast<long long>(value.nCurValue),
-                static_cast<unsigned long long>(device_timestamp_frequency_hz_));
+    XR_LOG_WARN(
+        "HikCamera DeviceTimestampIncrement unavailable: ret=%d value=%lld, "
+        "assume %llu Hz",
+        ret, static_cast<long long>(value.nCurValue),
+        static_cast<unsigned long long>(device_timestamp_frequency_hz_));
   }
 
   /**
@@ -762,19 +872,18 @@ class HikCamera : public LibXR::Application,
   /**
    * @brief 打印首帧时间戳和 SDK 帧号信息。
    */
-  void LogFirstCommittedFrame(const MV_FRAME_OUT_INFO_EX& frame_info, uint64_t timestamp_us)
+  void LogFirstCommittedFrame(const MV_FRAME_OUT_INFO_EX& frame_info,
+                              uint64_t timestamp_us)
   {
     const uint64_t dev_ts =
         CombineU32(frame_info.nDevTimeStampHigh, frame_info.nDevTimeStampLow);
-    XR_LOG_INFO("HikCamera first frame: frame=%u sensor_ts=%llu us dev_ts=%llu "
-                "host_ts=%lld counter=%u trigger=%u lost=%u",
-                frame_info.nFrameNum,
-                static_cast<unsigned long long>(timestamp_us),
-                static_cast<unsigned long long>(dev_ts),
-                static_cast<long long>(frame_info.nHostTimeStamp),
-                frame_info.nFrameCounter,
-                frame_info.nTriggerIndex,
-                frame_info.nLostPacket);
+    XR_LOG_INFO(
+        "HikCamera first frame: frame=%u sensor_ts=%llu us dev_ts=%llu "
+        "host_ts=%lld counter=%u trigger=%u lost=%u",
+        frame_info.nFrameNum, static_cast<unsigned long long>(timestamp_us),
+        static_cast<unsigned long long>(dev_ts),
+        static_cast<long long>(frame_info.nHostTimeStamp), frame_info.nFrameCounter,
+        frame_info.nTriggerIndex, frame_info.nLostPacket);
   }
 
   /**
@@ -810,20 +919,22 @@ class HikCamera : public LibXR::Application,
       }
 
       MV_FRAME_OUT_INFO_EX frame_info{};
-      const auto ret = MV_CC_GetImageForBGR(
-          camera_handle_, image->data.data(), static_cast<unsigned int>(Base::image_bytes),
-          &frame_info, static_cast<int>(runtime_.grab_timeout_ms));
+      const auto ret =
+          MV_CC_GetImageForBGR(camera_handle_, image->data.data(),
+                               static_cast<unsigned int>(Base::image_bytes), &frame_info,
+                               static_cast<int>(runtime_.grab_timeout_ms));
       if (ret != MV_OK)
       {
         ++failure_count_;
         continue;
       }
 
-      if (frame_info.nWidth != camera_info.width || frame_info.nHeight != camera_info.height ||
+      if (frame_info.nWidth != frame_geometry_.width ||
+          frame_info.nHeight != frame_geometry_.height ||
           frame_info.nFrameLen != static_cast<unsigned int>(Base::image_bytes))
       {
-        XR_LOG_ERROR("HikCamera frame geometry mismatch: %ux%u len=%u",
-                     frame_info.nWidth, frame_info.nHeight, frame_info.nFrameLen);
+        XR_LOG_ERROR("HikCamera frame geometry mismatch: %ux%u len=%u", frame_info.nWidth,
+                     frame_info.nHeight, frame_info.nFrameLen);
         ++failure_count_;
         continue;
       }
@@ -836,6 +947,7 @@ class HikCamera : public LibXR::Application,
       }
 
       image->timestamp_us = image_timestamp_us;
+      image->geometry = frame_geometry_;
       if (this->CommitImage())
       {
         if (frames_committed_ == 0)
@@ -857,26 +969,29 @@ class HikCamera : public LibXR::Application,
   static void CaptureThreadMain(Self* self) { self->CaptureLoop(); }
 
  private:
-  RuntimeParam runtime_{};  ///< 当前运行参数快照。
-  void* camera_handle_{nullptr};  ///< Hik SDK 设备 handle。
-  std::atomic<bool> camera_state_{false};  ///< 采集线程运行标志。
-  std::thread capture_thread_{};  ///< 采集线程。
-  bool capture_thread_created_{false};  ///< 线程是否已创建。
-  bool device_rotate_180_{false};  ///< 当前是否由相机完成 180 度旋转。
-  bool reverse_state_saved_{false};  ///< 是否保存过 ReverseX / ReverseY 原值。
-  bool geometry_state_saved_{false};  ///< 是否保存过宽高和偏移原值。
-  bool decimation_state_saved_{false};  ///< 是否保存过下采样原值。
-  bool old_reverse_x_{false};  ///< 启动前的 ReverseX。
-  bool old_reverse_y_{false};  ///< 启动前的 ReverseY。
-  uint32_t old_decimation_horizontal_{1};  ///< 启动前的横向下采样。
-  uint32_t old_decimation_vertical_{1};  ///< 启动前的纵向下采样。
-  int64_t old_width_{0};  ///< 启动前的宽度。
-  int64_t old_height_{0};  ///< 启动前的高度。
-  int64_t old_offset_x_{0};  ///< 启动前的 X 偏移。
-  int64_t old_offset_y_{0};  ///< 启动前的 Y 偏移。
-  MVCC_INTVALUE_EX full_width_range_{};  ///< 相机支持的宽度范围。
-  MVCC_INTVALUE_EX full_height_range_{};  ///< 相机支持的高度范围。
+  RuntimeParam runtime_{};                     ///< 当前运行参数快照。
+  void* camera_handle_{nullptr};               ///< Hik SDK 设备 handle。
+  std::atomic<bool> camera_state_{false};      ///< 采集线程运行标志。
+  std::thread capture_thread_{};               ///< 采集线程。
+  bool capture_thread_created_{false};         ///< 线程是否已创建。
+  bool device_rotate_180_{false};              ///< 当前是否由相机完成 180 度旋转。
+  bool reverse_state_saved_{false};            ///< 是否保存过 ReverseX / ReverseY 原值。
+  bool geometry_state_saved_{false};           ///< 是否保存过宽高和偏移原值。
+  bool decimation_state_saved_{false};         ///< 是否保存过下采样原值。
+  bool old_reverse_x_{false};                  ///< 启动前的 ReverseX。
+  bool old_reverse_y_{false};                  ///< 启动前的 ReverseY。
+  uint32_t old_decimation_horizontal_{1};      ///< 启动前的横向下采样。
+  uint32_t old_decimation_vertical_{1};        ///< 启动前的纵向下采样。
+  uint32_t applied_decimation_horizontal_{1};  ///< SDK 实际应用的横向下采样。
+  uint32_t applied_decimation_vertical_{1};    ///< SDK 实际应用的纵向下采样。
+  int64_t old_width_{0};                       ///< 启动前的宽度。
+  int64_t old_height_{0};                      ///< 启动前的高度。
+  int64_t old_offset_x_{0};                    ///< 启动前的 X 偏移。
+  int64_t old_offset_y_{0};                    ///< 启动前的 Y 偏移。
+  MVCC_INTVALUE_EX full_width_range_{};        ///< 相机支持的宽度范围。
+  MVCC_INTVALUE_EX full_height_range_{};       ///< 相机支持的高度范围。
+  FrameGeometry frame_geometry_{};             ///< 每帧按值发布的固定采样几何。
   uint64_t device_timestamp_frequency_hz_{microseconds_per_second};  ///< 设备时间戳频率。
-  uint32_t frames_committed_{0};  ///< 已提交帧数。
-  uint32_t failure_count_{0};  ///< 失败帧数。
+  uint32_t frames_committed_{0};                                     ///< 已提交帧数。
+  uint32_t failure_count_{0};                                        ///< 失败帧数。
 };
