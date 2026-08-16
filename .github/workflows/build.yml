@@ -20,8 +20,9 @@ jobs:
       - name: Checkout current module repo to ./Modules/${{ env.XR_MODULE_NAME }}
         uses: actions/checkout@v4
         with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           path: Modules/${{ env.XR_MODULE_NAME }}
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Create main.cpp
         run: |
@@ -44,6 +45,7 @@ jobs:
           cat > CMakeLists.txt <<'EOF'
           cmake_minimum_required(VERSION 3.16)
           project(xrobot_mod_test CXX)
+          include(CTest)
           set(CMAKE_CXX_STANDARD 20)
           set(CMAKE_CXX_STANDARD_REQUIRED ON)
           add_executable(xr_test main.cpp)
@@ -99,14 +101,31 @@ jobs:
       - name: Sync module repos from MANIFEST dependencies
         run: xrobot_init_mod
 
+      - name: Align coordinated dependency branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          for module_dir in Modules/*; do
+            [[ -d "${module_dir}" ]] || continue
+            [[ "$(basename "${module_dir}")" == "${XR_MODULE_NAME}" ]] && continue
+            git -C "${module_dir}" rev-parse --git-dir >/dev/null 2>&1 || continue
+            if git -C "${module_dir}" ls-remote --exit-code --heads origin "refs/heads/${candidate}" >/dev/null 2>&1; then
+              git -C "${module_dir}" fetch --depth=1 origin "refs/heads/${candidate}"
+              git -C "${module_dir}" checkout --detach FETCH_HEAD
+              git -C "${module_dir}" submodule update --init --recursive --depth=1
+            fi
+          done
+
       - name: Restore current module checkout
         run: rm -rf Modules/${{ env.XR_MODULE_NAME }}
 
       - name: Checkout current module repo again
         uses: actions/checkout@v4
         with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           path: Modules/${{ env.XR_MODULE_NAME }}
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Create module config from MANIFEST defaults
         run: |
@@ -125,13 +144,12 @@ jobs:
 
       - name: Build
         run: |
-          mkdir -p build
-          cd build
-          cmake ..
-          make
+          cmake -S . -B build -DBUILD_TESTING=ON
+          cmake --build build --parallel 2
+          ctest --test-dir build --output-on-failure --no-tests=error
 
       - name: Create Tag via GitHub API
-        if: ${{ success() && github.event_name != 'pull_request' }}
+        if: ${{ success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

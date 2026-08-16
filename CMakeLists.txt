@@ -43,3 +43,9 @@ target_link_libraries(${_DEPS_TARGET} INTERFACE
 )
 
 set_property(GLOBAL APPEND PROPERTY XR_MODULE_DEPS ${_DEPS_TARGET})
+
+if(BUILD_TESTING)
+  include(CTest)
+  add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/tests
+                   ${CMAKE_CURRENT_BINARY_DIR}/HikCamera_tests)
+endif()

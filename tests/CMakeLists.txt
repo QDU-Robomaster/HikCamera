@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.16)
+project(HikCameraProfileControlTests LANGUAGES CXX)
+
+include(CTest)
+
+add_executable(hik_camera_profile_control_test
+               hik_camera_profile_control_test.cpp)
+target_include_directories(hik_camera_profile_control_test
+                           PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
+target_compile_features(hik_camera_profile_control_test PRIVATE cxx_std_20)
+
+add_test(NAME hik_camera_profile_control_test
+         COMMAND hik_camera_profile_control_test)

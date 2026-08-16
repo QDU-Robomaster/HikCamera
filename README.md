@@ -18,7 +18,19 @@ HikCamera 从 Hikrobot USB 相机读取 BGR8 图像，并写入 `CameraBase<Fram
 
 模块启动时会按 `FrameLayout.width`、`FrameLayout.height` 和 WIDE 下采样倍率
 配置相机。默认产品配置使用 `720x540 / 2x2` 覆盖完整 `1440x1080` 传感器；
-标定配置可显式使用 `1440x1080 / 1x1`。NARROW 档固定使用 `1x1` 居中 ROI。
+标定配置可显式使用 `1440x1080 / 1x1`。NARROW 档固定使用 `1x1` 居中 ROI，
+启动时按相机 `OffsetX/OffsetY` 的实际步进对齐并以 SDK readback 生成档位描述。
+
+切档失败时模块会先在当前 SDK handle 上恢复上一档；若恢复失败，则关闭并重开
+设备后再次恢复上一档。只有恢复后的取流线程成功启动，才会把相机保留为可用状态。
+`SwitchProfile()`、`set_exposure` 和 `set_gain` 共用同一个设备控制锁，SDK handle 的
+停止、销毁和重建不会与参数写入并发；采集线程不获取该锁，切档通过停止并 join
+采集线程建立几何切换边界。
+
+第一次修改设备几何、下采样或旋转前会保存一份生命周期级原始快照。中途 reopen
+不会覆盖或释放该快照；每次恢复都要通过 SDK readback。只有最终 handle 已确认销毁且
+原始状态恢复验证成功，快照才会提交释放。关闭或销毁失败会记录 SDK 错误；旧 handle
+未确认销毁时不会再次打开设备。
 
 ## 时间戳
 
@@ -100,3 +112,5 @@ TriggerActivation = RisingEdge
 set_exposure <微秒>
 set_gain <值>
 ```
+
+这两个命令与档位切换使用同一设备控制锁，不会在 handle reopen 期间调用 SDK。

@@ -52,6 +52,7 @@ depends:
 #include <thread>
 
 #include "CameraBase.hpp"
+#include "HikCameraProfileControl.hpp"
 #include "MvCameraControl.h"
 #include "app_framework.hpp"
 #include "libxr.hpp"
@@ -211,7 +212,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     if (!(ValidateRuntimeProfileConfig() && CaptureStart() && InitializeProfiles() &&
           StartGrabbing() && StartCaptureThread()))
     {
-      CaptureStop();
+      (void)CaptureStop(true);
       throw std::runtime_error("HikCamera: failed to start camera");
     }
     app.Register(*this);
@@ -220,31 +221,38 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   /**
    * @brief 停止采集线程，关闭相机并恢复启动前保存的相机设置。
    */
-  ~HikCamera() override
+  ~HikCamera() noexcept override
   {
-    camera_state_.store(false);
-    if (capture_thread_created_ && capture_thread_.joinable())
+    LibXR::Mutex::LockGuard lock(control_mutex_);
+    const auto stopped = CaptureStop(true);
+    if (!stopped.AllSucceeded())
     {
-      capture_thread_.join();
-      capture_thread_created_ = false;
+      XR_LOG_ERROR(
+          "HikCamera teardown incomplete: thread=%d stop=%d rotation=%d "
+          "geometry=%d close=%d destroy=%d",
+          stopped.thread_stopped ? 1 : 0, stopped.stream_stopped ? 1 : 0,
+          stopped.rotation_restored ? 1 : 0, stopped.geometry_restored ? 1 : 0,
+          stopped.device_closed ? 1 : 0, stopped.handle_destroyed ? 1 : 0);
     }
-    CaptureStop();
   }
 
   void OnMonitor() override
   {
-    XR_LOG_INFO("HikCamera monitor: frames=%u failures=%u", frames_committed_,
-                failure_count_);
+    XR_LOG_INFO("HikCamera monitor: frames=%u failures=%u",
+                frames_committed_.load(std::memory_order_relaxed),
+                failure_count_.load(std::memory_order_relaxed));
   }
 
   void SetExposure(double exposure) override
   {
+    LibXR::Mutex::LockGuard lock(control_mutex_);
     runtime_.exposure_time = static_cast<float>(exposure);
     UpdateParameters();
   }
 
   void SetGain(double gain) override
   {
+    LibXR::Mutex::LockGuard lock(control_mutex_);
     runtime_.gain = ClampGain(static_cast<float>(gain));
     UpdateParameters();
   }
@@ -260,10 +268,12 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   /**
    * @brief 停止 SDK 取流并阻塞切换到指定档位。
    *
-   * 调用方必须先停止外部触发。失败时采集线程保持停止，不回滚已经写入的 SDK 节点。
+   * 调用方必须先停止外部触发。切换失败时先在原 handle 上恢复上一档；恢复失败时
+   * 关闭并重开设备，再尝试恢复上一档。请求失败时不会改写 `applied`。
    */
   LibXR::ErrorCode SwitchProfile(ProfileId id, AppliedProfile& applied) override
   {
+    LibXR::Mutex::LockGuard lock(control_mutex_);
     const CameraProfile* requested = FindProfile(id);
     if (requested == nullptr)
     {
@@ -273,51 +283,100 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     {
       if (!camera_state_.load(std::memory_order_acquire))
       {
-        return LibXR::ErrorCode::STATE_ERR;
+        if (!ReopenProfile(id, requested->geometry))
+        {
+          return LibXR::ErrorCode::STATE_ERR;
+        }
       }
       applied = {.id = id, .geometry = frame_geometry_};
       return LibXR::ErrorCode::OK;
     }
 
-    camera_state_.store(false, std::memory_order_release);
-    if (capture_thread_created_ && capture_thread_.joinable())
+    const CameraProfile* previous = FindProfile(active_profile_);
+    if (previous == nullptr)
     {
-      capture_thread_.join();
-      capture_thread_created_ = false;
+      return LibXR::ErrorCode::STATE_ERR;
+    }
+
+    if (!StopCaptureThread())
+    {
+      return LibXR::ErrorCode::FAILED;
     }
     this->DiscardWritableImage();
 
-    if (camera_handle_ == nullptr)
+    const auto outcome = HikCameraDetail::RunProfileSwitchWithRecovery(
+        [this, id, requested]()
+        {
+          return PrepareProfileSwitch(id) && TryActivateProfile(id, requested->geometry);
+        },
+        [this, previous]()
+        { return TryActivateProfile(previous->id, previous->geometry); },
+        [this, previous]() { return ReopenProfile(previous->id, previous->geometry); });
+
+    if (outcome == HikCameraDetail::ProfileSwitchOutcome::APPLIED)
     {
-      XR_LOG_ERROR("HikCamera failed to switch profile=%u; camera handle is null",
+      active_profile_ = id;
+      applied = {.id = id, .geometry = frame_geometry_};
+      return LibXR::ErrorCode::OK;
+    }
+
+    if (outcome == HikCameraDetail::ProfileSwitchOutcome::ROLLED_BACK)
+    {
+      XR_LOG_WARN("HikCamera profile=%u failed; previous profile restored",
+                  static_cast<unsigned>(id));
+    }
+    else if (outcome == HikCameraDetail::ProfileSwitchOutcome::REOPENED)
+    {
+      XR_LOG_WARN("HikCamera profile=%u failed; device reopened on previous profile",
+                  static_cast<unsigned>(id));
+    }
+    else
+    {
+      XR_LOG_ERROR("HikCamera profile=%u failed and recovery was unsuccessful",
                    static_cast<unsigned>(id));
-      return LibXR::ErrorCode::FAILED;
     }
-    const int clear_result = MV_CC_ClearImageBuffer(camera_handle_);
-    const int stop_result = MV_CC_StopGrabbing(camera_handle_);
-    if (clear_result != MV_OK || stop_result != MV_OK)
-    {
-      XR_LOG_ERROR("HikCamera failed to stop profile=%u; clear=%d stop=%d",
-                   static_cast<unsigned>(id), clear_result, stop_result);
-      return LibXR::ErrorCode::FAILED;
-    }
-
-    if (!ConfigureImageGeometry(id) ||
-        !CameraTypes::SameFrameGeometry(frame_geometry_, requested->geometry) ||
-        !StartGrabbing() || !StartCaptureThread())
-    {
-      XR_LOG_ERROR(
-          "HikCamera failed to switch profile=%u; capture thread remains stopped",
-          static_cast<unsigned>(id));
-      return LibXR::ErrorCode::FAILED;
-    }
-
-    active_profile_ = id;
-    applied = {.id = id, .geometry = frame_geometry_};
-    return LibXR::ErrorCode::OK;
+    return LibXR::ErrorCode::FAILED;
   }
 
  private:
+  struct ImageGeometryState
+  {
+    int64_t width{0};
+    int64_t height{0};
+    int64_t offset_x{0};
+    int64_t offset_y{0};
+  };
+
+  struct DecimationState
+  {
+    uint32_t decimation_horizontal{1};
+    uint32_t decimation_vertical{1};
+  };
+
+  struct RotationState
+  {
+    bool reverse_x{false};
+    bool reverse_y{false};
+  };
+
+  struct CaptureStopResult
+  {
+    bool thread_stopped{true};
+    bool stream_stopped{true};
+    bool rotation_restored{true};
+    bool geometry_restored{true};
+    bool device_closed{true};
+    bool handle_destroyed{true};
+
+    [[nodiscard]] bool HandleReleased() const noexcept { return handle_destroyed; }
+
+    [[nodiscard]] bool AllSucceeded() const noexcept
+    {
+      return thread_stopped && stream_stopped && rotation_restored && geometry_restored &&
+             device_closed && handle_destroyed;
+    }
+  };
+
   /**
    * @brief 把增益限制在当前配置允许的范围内。
    */
@@ -366,19 +425,22 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       return false;
     }
 
-    FrameGeometry narrow = frame_geometry_;
-    narrow.roi_offset_x_native = (calibration.native_width - frame_layout.width) / 2U;
-    narrow.roi_offset_y_native = (calibration.native_height - frame_layout.height) / 2U;
-    narrow.decimation_x = 1U;
-    narrow.decimation_y = 1U;
-    if (!CameraTypes::ValidateFrameGeometry(frame_layout, calibration, narrow))
+    const FrameGeometry wide = frame_geometry_;
+    if (!ConfigureImageGeometry(ProfileId::NARROW))
     {
-      XR_LOG_ERROR("HikCamera generated invalid NARROW profile geometry");
+      XR_LOG_ERROR("HikCamera failed to probe NARROW profile geometry");
+      return false;
+    }
+    const FrameGeometry narrow = frame_geometry_;
+    if (!ConfigureImageGeometry(ProfileId::WIDE) ||
+        !CameraTypes::SameFrameGeometry(frame_geometry_, wide))
+    {
+      XR_LOG_ERROR("HikCamera failed to restore WIDE geometry after profile probe");
       return false;
     }
 
     profiles_[0] = {.id = ProfileId::WIDE,
-                    .geometry = frame_geometry_,
+                    .geometry = wide,
                     .trigger_period_us = runtime_.wide_trigger_period_us};
     profiles_[1] = {.id = ProfileId::NARROW,
                     .geometry = narrow,
@@ -397,6 +459,81 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       }
     }
     return nullptr;
+  }
+
+  [[nodiscard]] bool StopCaptureThread() noexcept
+  {
+    camera_state_.store(false, std::memory_order_release);
+    if (!capture_thread_.joinable())
+    {
+      return true;
+    }
+    try
+    {
+      capture_thread_.join();
+      return true;
+    }
+    catch (const std::system_error& error)
+    {
+      XR_LOG_ERROR("HikCamera failed to join capture thread: %s", error.what());
+      return false;
+    }
+  }
+
+  bool PrepareProfileSwitch(ProfileId requested)
+  {
+    if (camera_handle_ == nullptr)
+    {
+      XR_LOG_ERROR("HikCamera failed to switch profile=%u; camera handle is null",
+                   static_cast<unsigned>(requested));
+      return false;
+    }
+
+    const int clear_result = MV_CC_ClearImageBuffer(camera_handle_);
+    const bool stream_stopped = StopGrabbing("profile switch");
+    if (clear_result != MV_OK || !stream_stopped)
+    {
+      XR_LOG_ERROR("HikCamera failed to prepare profile=%u; clear=%d stop=%d",
+                   static_cast<unsigned>(requested), clear_result,
+                   stream_stopped ? 1 : 0);
+      return false;
+    }
+    return true;
+  }
+
+  bool TryActivateProfile(ProfileId id, const FrameGeometry& expected_geometry)
+  {
+    return camera_handle_ != nullptr && !stream_state_.Active() &&
+           ConfigureImageGeometry(id) &&
+           CameraTypes::SameFrameGeometry(frame_geometry_, expected_geometry) &&
+           StartGrabbing() && StartCaptureThread();
+  }
+
+  bool ReopenProfile(ProfileId id, const FrameGeometry& expected_geometry)
+  {
+    const auto stopped = CaptureStop(false);
+    if (!stopped.HandleReleased())
+    {
+      XR_LOG_ERROR(
+          "HikCamera cannot reopen profile=%u because the previous handle remains live",
+          static_cast<unsigned>(id));
+      return false;
+    }
+    if (!CaptureStart())
+    {
+      (void)CaptureStop(false);
+      return false;
+    }
+
+    const bool geometry_ready =
+        (id == ProfileId::WIDE || ConfigureImageGeometry(id)) &&
+        CameraTypes::SameFrameGeometry(frame_geometry_, expected_geometry);
+    if (!geometry_ready || !StartGrabbing() || !StartCaptureThread())
+    {
+      (void)CaptureStop(false);
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -527,23 +664,6 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     return range.nInc <= 1 || ((value - range.nMin) % range.nInc) == 0;
   }
 
-  static int64_t AlignDown(int64_t value, const MVCC_INTVALUE_EX& range)
-  {
-    if (value < range.nMin)
-    {
-      value = range.nMin;
-    }
-    if (value > range.nMax)
-    {
-      value = range.nMax;
-    }
-    if (range.nInc <= 1)
-    {
-      return value;
-    }
-    return range.nMin + ((value - range.nMin) / range.nInc) * range.nInc;
-  }
-
   /**
    * @brief 配置相机下采样倍率。
    *
@@ -579,12 +699,9 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       return true;
     }
 
-    if (!decimation_state_saved_)
-    {
-      old_decimation_horizontal_ = old_horizontal.nCurValue;
-      old_decimation_vertical_ = old_vertical.nCurValue;
-      decimation_state_saved_ = true;
-    }
+    (void)original_decimation_state_.CaptureOnce(
+        {.decimation_horizontal = old_horizontal.nCurValue,
+         .decimation_vertical = old_vertical.nCurValue});
 
     if (!SetEnumValue("DecimationHorizontal", horizontal) ||
         !SetEnumValue("DecimationVertical", vertical))
@@ -633,14 +750,10 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       return false;
     }
 
-    if (!geometry_state_saved_)
-    {
-      old_width_ = old_width.nCurValue;
-      old_height_ = old_height.nCurValue;
-      old_offset_x_ = old_offset_x.nCurValue;
-      old_offset_y_ = old_offset_y.nCurValue;
-      geometry_state_saved_ = true;
-    }
+    (void)original_geometry_state_.CaptureOnce({.width = old_width.nCurValue,
+                                                .height = old_height.nCurValue,
+                                                .offset_x = old_offset_x.nCurValue,
+                                                .offset_y = old_offset_y.nCurValue});
 
     uint32_t decimation_x = 0U;
     uint32_t decimation_y = 0U;
@@ -704,11 +817,17 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     const int64_t offset_x =
         profile == ProfileId::WIDE
             ? 0
-            : AlignDown((full_width_range_.nMax - target_width) / 2, offset_x_range);
-    const int64_t offset_y =
-        profile == ProfileId::WIDE
-            ? 0
-            : AlignDown((full_height_range_.nMax - target_height) / 2, offset_y_range);
+            : HikCameraDetail::CenteredAlignedOffset(full_width_range_.nMax, target_width,
+                                                     {.minimum = offset_x_range.nMin,
+                                                      .maximum = offset_x_range.nMax,
+                                                      .increment = offset_x_range.nInc});
+    const int64_t offset_y = profile == ProfileId::WIDE
+                                 ? 0
+                                 : HikCameraDetail::CenteredAlignedOffset(
+                                       full_height_range_.nMax, target_height,
+                                       {.minimum = offset_y_range.nMin,
+                                        .maximum = offset_y_range.nMax,
+                                        .increment = offset_y_range.nInc});
     if (!SetIntValue("OffsetX", offset_x) || !SetIntValue("OffsetY", offset_y))
     {
       return false;
@@ -792,26 +911,93 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   /**
    * @brief 恢复启动前保存的图像尺寸、偏移和下采样设置。
    */
-  void RestoreImageGeometry()
+  [[nodiscard]] bool RestoreImageGeometry()
   {
-    if (!geometry_state_saved_ || camera_handle_ == nullptr)
+    const auto* geometry = original_geometry_state_.Get();
+    const auto* decimation = original_decimation_state_.Get();
+    if (geometry == nullptr && decimation == nullptr)
     {
-      return;
+      return true;
+    }
+    if (camera_handle_ == nullptr)
+    {
+      return false;
     }
 
-    (void)SetIntValue("OffsetX", 0);
-    (void)SetIntValue("OffsetY", 0);
-    if (decimation_state_saved_)
+    bool geometry_writes_succeeded = true;
+    bool decimation_writes_succeeded = true;
+    const auto record_geometry_write = [&geometry_writes_succeeded](bool result)
+    { geometry_writes_succeeded = result && geometry_writes_succeeded; };
+    const auto record_decimation_write = [&decimation_writes_succeeded](bool result)
+    { decimation_writes_succeeded = result && decimation_writes_succeeded; };
+
+    if (geometry != nullptr)
     {
-      (void)SetEnumValue("DecimationHorizontal", old_decimation_horizontal_);
-      (void)SetEnumValue("DecimationVertical", old_decimation_vertical_);
-      decimation_state_saved_ = false;
+      record_geometry_write(SetIntValue("OffsetX", 0));
+      record_geometry_write(SetIntValue("OffsetY", 0));
     }
-    (void)SetIntValue("Width", old_width_);
-    (void)SetIntValue("Height", old_height_);
-    (void)SetIntValue("OffsetX", old_offset_x_);
-    (void)SetIntValue("OffsetY", old_offset_y_);
-    geometry_state_saved_ = false;
+    if (decimation != nullptr)
+    {
+      record_decimation_write(
+          SetEnumValue("DecimationHorizontal", decimation->decimation_horizontal));
+      record_decimation_write(
+          SetEnumValue("DecimationVertical", decimation->decimation_vertical));
+    }
+    if (geometry != nullptr)
+    {
+      record_geometry_write(SetIntValue("Width", geometry->width));
+      record_geometry_write(SetIntValue("Height", geometry->height));
+      record_geometry_write(SetIntValue("OffsetX", geometry->offset_x));
+      record_geometry_write(SetIntValue("OffsetY", geometry->offset_y));
+    }
+
+    bool geometry_readback_matches = true;
+    if (geometry != nullptr)
+    {
+      MVCC_INTVALUE_EX width{};
+      MVCC_INTVALUE_EX height{};
+      MVCC_INTVALUE_EX offset_x{};
+      MVCC_INTVALUE_EX offset_y{};
+      const bool width_read = GetIntValue("Width", width);
+      const bool height_read = GetIntValue("Height", height);
+      const bool offset_x_read = GetIntValue("OffsetX", offset_x);
+      const bool offset_y_read = GetIntValue("OffsetY", offset_y);
+      const bool readback_succeeded =
+          width_read && height_read && offset_x_read && offset_y_read;
+      geometry_readback_matches = readback_succeeded &&
+                                  width.nCurValue == geometry->width &&
+                                  height.nCurValue == geometry->height &&
+                                  offset_x.nCurValue == geometry->offset_x &&
+                                  offset_y.nCurValue == geometry->offset_y;
+      if (!geometry_readback_matches)
+      {
+        XR_LOG_ERROR("HikCamera original image geometry restore readback mismatch");
+      }
+    }
+
+    bool decimation_readback_matches = true;
+    if (decimation != nullptr)
+    {
+      MVCC_ENUMVALUE horizontal{};
+      MVCC_ENUMVALUE vertical{};
+      const bool horizontal_read = GetEnumValue("DecimationHorizontal", horizontal);
+      const bool vertical_read = GetEnumValue("DecimationVertical", vertical);
+      const bool readback_succeeded = horizontal_read && vertical_read;
+      decimation_readback_matches =
+          readback_succeeded &&
+          horizontal.nCurValue == decimation->decimation_horizontal &&
+          vertical.nCurValue == decimation->decimation_vertical;
+      if (!decimation_readback_matches)
+      {
+        XR_LOG_ERROR("HikCamera original decimation restore readback mismatch");
+      }
+    }
+
+    const bool geometry_restored = original_geometry_state_.CompleteRestore(
+        geometry_writes_succeeded, geometry_readback_matches, false);
+    const bool decimation_restored = original_decimation_state_.CompleteRestore(
+        decimation_writes_succeeded, decimation_readback_matches, false);
+    return geometry_restored && decimation_restored;
   }
 
   /**
@@ -841,9 +1027,8 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       return true;
     }
 
-    old_reverse_x_ = old_reverse_x;
-    old_reverse_y_ = old_reverse_y;
-    reverse_state_saved_ = true;
+    (void)original_rotation_state_.CaptureOnce(
+        {.reverse_x = old_reverse_x, .reverse_y = old_reverse_y});
     if (SetBoolValue("ReverseX", true) && SetBoolValue("ReverseY", true))
     {
       bool applied_reverse_x = false;
@@ -860,10 +1045,12 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       }
     }
 
-    (void)SetBoolValue("ReverseX", old_reverse_x);
-    (void)SetBoolValue("ReverseY", old_reverse_y);
-    reverse_state_saved_ = false;
+    const bool rollback_succeeded = RestoreDeviceRotation();
     XR_LOG_ERROR("HikCamera failed to enable camera ReverseX+ReverseY");
+    if (!rollback_succeeded)
+    {
+      XR_LOG_ERROR("HikCamera failed to restore rotation after configuration failure");
+    }
     return false;
   }
 
@@ -894,17 +1081,43 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   /**
    * @brief 恢复启动前保存的 `ReverseX` 和 `ReverseY` 设置。
    */
-  void RestoreDeviceRotation()
+  [[nodiscard]] bool RestoreDeviceRotation()
   {
-    if (!device_rotate_180_ || !reverse_state_saved_ || camera_handle_ == nullptr)
+    const auto* rotation = original_rotation_state_.Get();
+    if (rotation == nullptr)
     {
-      return;
+      return true;
+    }
+    if (camera_handle_ == nullptr)
+    {
+      return false;
     }
 
-    (void)SetBoolValue("ReverseX", old_reverse_x_);
-    (void)SetBoolValue("ReverseY", old_reverse_y_);
-    device_rotate_180_ = false;
-    reverse_state_saved_ = false;
+    const bool reverse_x_written = SetBoolValue("ReverseX", rotation->reverse_x);
+    const bool reverse_y_written = SetBoolValue("ReverseY", rotation->reverse_y);
+    const bool writes_succeeded = reverse_x_written && reverse_y_written;
+    bool applied_reverse_x = false;
+    bool applied_reverse_y = false;
+    const bool reverse_x_read = GetBoolValue("ReverseX", applied_reverse_x);
+    const bool reverse_y_read = GetBoolValue("ReverseY", applied_reverse_y);
+    const bool readback_succeeded = reverse_x_read && reverse_y_read;
+    const bool readback_matches = readback_succeeded &&
+                                  applied_reverse_x == rotation->reverse_x &&
+                                  applied_reverse_y == rotation->reverse_y;
+    if (!readback_matches)
+    {
+      XR_LOG_ERROR("HikCamera original rotation restore readback mismatch");
+    }
+    const bool restored = original_rotation_state_.CompleteRestore(
+        writes_succeeded, readback_matches, false);
+    if (restored)
+    {
+      device_rotate_180_ = false;
+      frame_geometry_.flags =
+          (rotation->reverse_x ? CameraTypes::FRAME_GEOMETRY_REVERSE_X : 0U) |
+          (rotation->reverse_y ? CameraTypes::FRAME_GEOMETRY_REVERSE_Y : 0U);
+    }
+    return restored;
   }
 
   /**
@@ -912,6 +1125,12 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
    */
   bool CaptureStart()
   {
+    if (camera_handle_ != nullptr)
+    {
+      XR_LOG_ERROR("HikCamera refused to open a second SDK handle");
+      return false;
+    }
+
     MV_CC_DEVICE_INFO_LIST device_list{};
     auto ret = MV_CC_EnumDevices(MV_USB_DEVICE, &device_list);
     if (ret != MV_OK || device_list.nDeviceNum == 0)
@@ -995,13 +1214,39 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
    */
   bool StartGrabbing()
   {
+    if (camera_handle_ == nullptr || stream_state_.Active())
+    {
+      XR_LOG_ERROR("HikCamera refused to start SDK stream: handle=%d active=%d",
+                   camera_handle_ != nullptr ? 1 : 0, stream_state_.Active() ? 1 : 0);
+      return false;
+    }
     const auto ret = MV_CC_StartGrabbing(camera_handle_);
     if (ret != MV_OK)
     {
       XR_LOG_ERROR("HikCamera MV_CC_StartGrabbing failed: %d", ret);
       return false;
     }
+    stream_state_.MarkStarted();
     return true;
+  }
+
+  /**
+   * @brief Stop the SDK stream once for the current successful start.
+   */
+  [[nodiscard]] bool StopGrabbing(const char* phase) noexcept
+  {
+    int ret = MV_OK;
+    const bool stopped = stream_state_.Stop(
+        [this, &ret]() noexcept
+        {
+          ret = MV_CC_StopGrabbing(camera_handle_);
+          return ret == MV_OK;
+        });
+    if (!stopped)
+    {
+      XR_LOG_ERROR("HikCamera MV_CC_StopGrabbing failed during %s: %d", phase, ret);
+    }
+    return stopped;
   }
 
   /**
@@ -1009,37 +1254,92 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
    */
   bool StartCaptureThread()
   {
+    if (capture_thread_.joinable())
+    {
+      XR_LOG_ERROR("HikCamera refused to replace a live capture thread");
+      return false;
+    }
     camera_state_.store(true, std::memory_order_release);
     try
     {
       capture_thread_ = std::thread(CaptureThreadMain, this);
-      capture_thread_created_ = true;
       return true;
     }
     catch (const std::system_error& error)
     {
       camera_state_.store(false, std::memory_order_release);
-      (void)MV_CC_StopGrabbing(camera_handle_);
+      (void)StopGrabbing("capture thread start rollback");
       XR_LOG_ERROR("HikCamera failed to create capture thread: %s", error.what());
       return false;
     }
   }
 
   /**
-   * @brief 停止取流、恢复相机设置并销毁 SDK handle。
+   * @brief 停止取流、验证原始设置恢复并销毁 SDK handle。
+   *
+   * @param release_snapshots 成功销毁最终 handle 后是否提交原始状态恢复。
    */
-  void CaptureStop()
+  [[nodiscard]] CaptureStopResult CaptureStop(bool release_snapshots) noexcept
   {
+    CaptureStopResult result{};
+    result.thread_stopped = StopCaptureThread();
     if (camera_handle_ == nullptr)
     {
-      return;
+      if (stream_state_.Active())
+      {
+        XR_LOG_ERROR("HikCamera SDK stream is active without a camera handle");
+        result.stream_stopped = false;
+      }
+      return result;
     }
-    (void)MV_CC_StopGrabbing(camera_handle_);
-    RestoreDeviceRotation();
-    RestoreImageGeometry();
-    (void)MV_CC_CloseDevice(camera_handle_);
-    (void)MV_CC_DestroyHandle(camera_handle_);
-    camera_handle_ = nullptr;
+    if (!result.thread_stopped)
+    {
+      result.stream_stopped = false;
+      result.rotation_restored = false;
+      result.geometry_restored = false;
+      result.device_closed = false;
+      result.handle_destroyed = false;
+      return result;
+    }
+
+    result.stream_stopped = StopGrabbing("teardown");
+
+    result.rotation_restored = RestoreDeviceRotation();
+    result.geometry_restored = RestoreImageGeometry();
+
+    const int close_result = MV_CC_CloseDevice(camera_handle_);
+    result.device_closed = close_result == MV_OK;
+    if (!result.device_closed)
+    {
+      XR_LOG_ERROR("HikCamera MV_CC_CloseDevice failed: %d", close_result);
+    }
+    else
+    {
+      stream_state_.MarkReleased();
+    }
+
+    const int destroy_result = MV_CC_DestroyHandle(camera_handle_);
+    result.handle_destroyed = destroy_result == MV_OK;
+    if (result.handle_destroyed)
+    {
+      camera_handle_ = nullptr;
+      stream_state_.MarkReleased();
+    }
+    else
+    {
+      XR_LOG_ERROR("HikCamera MV_CC_DestroyHandle failed: %d", destroy_result);
+    }
+
+    if (release_snapshots && result.handle_destroyed)
+    {
+      (void)original_rotation_state_.CompleteRestore(result.rotation_restored,
+                                                     result.rotation_restored, true);
+      (void)original_geometry_state_.CompleteRestore(result.geometry_restored,
+                                                     result.geometry_restored, true);
+      (void)original_decimation_state_.CompleteRestore(result.geometry_restored,
+                                                       result.geometry_restored, true);
+    }
+    return result;
   }
 
   /**
@@ -1165,7 +1465,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
                                static_cast<int>(runtime_.grab_timeout_ms));
       if (ret != MV_OK)
       {
-        ++failure_count_;
+        failure_count_.fetch_add(1U, std::memory_order_relaxed);
         continue;
       }
 
@@ -1175,14 +1475,14 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       {
         XR_LOG_ERROR("HikCamera frame geometry mismatch: %ux%u len=%u", frame_info.nWidth,
                      frame_info.nHeight, frame_info.nFrameLen);
-        ++failure_count_;
+        failure_count_.fetch_add(1U, std::memory_order_relaxed);
         continue;
       }
 
       uint64_t image_timestamp_us = 0;
       if (!ResolveImageTimestampUs(frame_info, image_timestamp_us))
       {
-        ++failure_count_;
+        failure_count_.fetch_add(1U, std::memory_order_relaxed);
         continue;
       }
 
@@ -1190,15 +1490,16 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       image->geometry = frame_geometry_;
       if (this->CommitImage())
       {
-        if (frames_committed_ == 0)
+        const uint32_t previous =
+            frames_committed_.fetch_add(1U, std::memory_order_relaxed);
+        if (previous == 0U)
         {
           LogFirstCommittedFrame(frame_info, image_timestamp_us);
         }
-        ++frames_committed_;
       }
       else
       {
-        ++failure_count_;
+        failure_count_.fetch_add(1U, std::memory_order_relaxed);
       }
     }
   }
@@ -1209,31 +1510,24 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   static void CaptureThreadMain(Self* self) { self->CaptureLoop(); }
 
  private:
-  RuntimeParam runtime_{};                     ///< 当前运行参数快照。
-  void* camera_handle_{nullptr};               ///< Hik SDK 设备 handle。
-  std::atomic<bool> camera_state_{false};      ///< 采集线程运行标志。
-  std::thread capture_thread_{};               ///< 采集线程。
-  bool capture_thread_created_{false};         ///< 线程是否已创建。
-  bool device_rotate_180_{false};              ///< 当前是否由相机完成 180 度旋转。
-  bool reverse_state_saved_{false};            ///< 是否保存过 ReverseX / ReverseY 原值。
-  bool geometry_state_saved_{false};           ///< 是否保存过宽高和偏移原值。
-  bool decimation_state_saved_{false};         ///< 是否保存过下采样原值。
-  bool old_reverse_x_{false};                  ///< 启动前的 ReverseX。
-  bool old_reverse_y_{false};                  ///< 启动前的 ReverseY。
-  uint32_t old_decimation_horizontal_{1};      ///< 启动前的横向下采样。
-  uint32_t old_decimation_vertical_{1};        ///< 启动前的纵向下采样。
+  RuntimeParam runtime_{};                          ///< 当前运行参数快照。
+  void* camera_handle_{nullptr};                    ///< Hik SDK 设备 handle。
+  LibXR::Mutex control_mutex_{};                    ///< 串行设备控制和 handle 生命周期。
+  HikCameraDetail::SdkStreamState stream_state_{};  ///< SDK 取流启停状态。
+  std::atomic<bool> camera_state_{false};           ///< 采集线程运行标志。
+  std::thread capture_thread_{};                    ///< 采集线程。
+  bool device_rotate_180_{false};                   ///< 当前是否由相机完成 180 度旋转。
+  HikCameraDetail::OriginalStateSnapshot<RotationState> original_rotation_state_{};
+  HikCameraDetail::OriginalStateSnapshot<ImageGeometryState> original_geometry_state_{};
+  HikCameraDetail::OriginalStateSnapshot<DecimationState> original_decimation_state_{};
   uint32_t applied_decimation_horizontal_{1};  ///< SDK 实际应用的横向下采样。
   uint32_t applied_decimation_vertical_{1};    ///< SDK 实际应用的纵向下采样。
-  int64_t old_width_{0};                       ///< 启动前的宽度。
-  int64_t old_height_{0};                      ///< 启动前的高度。
-  int64_t old_offset_x_{0};                    ///< 启动前的 X 偏移。
-  int64_t old_offset_y_{0};                    ///< 启动前的 Y 偏移。
   MVCC_INTVALUE_EX full_width_range_{};        ///< 相机支持的宽度范围。
   MVCC_INTVALUE_EX full_height_range_{};       ///< 相机支持的高度范围。
   FrameGeometry frame_geometry_{};             ///< 每帧按值发布的固定采样几何。
   std::array<CameraProfile, 2U> profiles_{};   ///< 生命周期内稳定的 WIDE/NARROW 档位。
   ProfileId active_profile_{ProfileId::WIDE};  ///< 当前成功生效的档位。
   uint64_t device_timestamp_frequency_hz_{microseconds_per_second};  ///< 设备时间戳频率。
-  uint32_t frames_committed_{0};                                     ///< 已提交帧数。
-  uint32_t failure_count_{0};                                        ///< 失败帧数。
+  std::atomic<uint32_t> frames_committed_{0};                        ///< 已提交帧数。
+  std::atomic<uint32_t> failure_count_{0};                           ///< 失败帧数。
 };
