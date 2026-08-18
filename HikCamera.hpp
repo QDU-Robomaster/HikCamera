@@ -33,6 +33,7 @@ required_hardware:
   - Hikrobot USB camera
 depends:
   - qdu-future/CameraBase
+  - xrobot-org/DurationStatistics
 === END MANIFEST === */
 // clang-format on
 
@@ -48,6 +49,7 @@ depends:
 #include <thread>
 
 #include "CameraBase.hpp"
+#include "DurationStatistics.hpp"
 #include "MvCameraControl.h"
 #include "app_framework.hpp"
 #include "libxr.hpp"
@@ -167,8 +169,15 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   void OnMonitor() override
   {
+    const auto frame_capture = frame_capture_duration_.GetSummary();
     XR_LOG_INFO("HikCamera monitor: frames=%u failures=%u", frames_committed_,
                 failure_count_);
+    XR_LOG_INFO(
+        "HikCamera capture count=%llu average_us=%llu minimum_us=%llu maximum_us=%llu",
+        static_cast<unsigned long long>(frame_capture.sample_count),
+        static_cast<unsigned long long>(frame_capture.average_us),
+        static_cast<unsigned long long>(frame_capture.minimum_us),
+        static_cast<unsigned long long>(frame_capture.maximum_us));
   }
 
   void SetExposure(double exposure) override
@@ -1072,6 +1081,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
         continue;
       }
 
+      auto frame_capture_measurement = frame_capture_duration_.Measure();
       MV_FRAME_OUT_INFO_EX frame_info{};
       const auto ret =
           MV_CC_GetImageForBGR(camera_handle_, image->data.data(),
@@ -1148,6 +1158,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   std::array<CameraProfile, 2U> profiles_{};   ///< 生命周期内稳定的 WIDE/NARROW 档位。
   ProfileId active_profile_{ProfileId::WIDE};  ///< 当前成功生效的档位。
   uint64_t device_timestamp_frequency_hz_{microseconds_per_second};  ///< 设备时间戳频率。
+  XRobot::DurationStatistics frame_capture_duration_{};
   uint32_t frames_committed_{0};                                     ///< 已提交帧数。
   uint32_t failure_count_{0};                                        ///< 失败帧数。
 };
