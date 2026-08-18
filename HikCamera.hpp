@@ -170,8 +170,9 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   void OnMonitor() override
   {
     const auto frame_capture = frame_capture_duration_.GetSummary();
-    XR_LOG_INFO("HikCamera monitor: frames=%u failures=%u", frames_committed_,
-                failure_count_);
+    XR_LOG_INFO("HikCamera monitor: frames=%u failures=%u",
+                frames_committed_.load(std::memory_order_relaxed),
+                failure_count_.load(std::memory_order_relaxed));
     XR_LOG_INFO(
         "HikCamera capture count=%llu average_us=%llu minimum_us=%llu maximum_us=%llu",
         static_cast<unsigned long long>(frame_capture.sample_count),
@@ -1089,7 +1090,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
                                static_cast<int>(runtime_.grab_timeout_ms));
       if (ret != MV_OK)
       {
-        ++failure_count_;
+        failure_count_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
 
@@ -1099,14 +1100,14 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       {
         XR_LOG_ERROR("HikCamera frame geometry mismatch: %ux%u len=%u", frame_info.nWidth,
                      frame_info.nHeight, frame_info.nFrameLen);
-        ++failure_count_;
+        failure_count_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
 
       uint64_t image_timestamp_us = 0;
       if (!ResolveImageTimestampUs(frame_info, image_timestamp_us))
       {
-        ++failure_count_;
+        failure_count_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
 
@@ -1114,15 +1115,15 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       image->geometry = frame_geometry_;
       if (this->CommitImage())
       {
-        if (frames_committed_ == 0)
+        if (frames_committed_.load(std::memory_order_relaxed) == 0)
         {
           LogFirstCommittedFrame(frame_info, image_timestamp_us);
         }
-        ++frames_committed_;
+        frames_committed_.fetch_add(1, std::memory_order_relaxed);
       }
       else
       {
-        ++failure_count_;
+        failure_count_.fetch_add(1, std::memory_order_relaxed);
       }
     }
   }
@@ -1159,6 +1160,6 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   ProfileId active_profile_{ProfileId::WIDE};  ///< 当前成功生效的档位。
   uint64_t device_timestamp_frequency_hz_{microseconds_per_second};  ///< 设备时间戳频率。
   XRobot::DurationStatistics frame_capture_duration_{};
-  uint32_t frames_committed_{0};                                     ///< 已提交帧数。
-  uint32_t failure_count_{0};                                        ///< 失败帧数。
+  std::atomic<uint32_t> frames_committed_{0};                        ///< 已提交帧数。
+  std::atomic<uint32_t> failure_count_{0};                           ///< 失败帧数。
 };
