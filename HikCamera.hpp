@@ -23,6 +23,10 @@ constructor_args:
       grab_timeout_ms: 100
       image_node_num: 3
       rotate_180: false
+      wide_decimation_x: 2
+      wide_decimation_y: 2
+      wide_trigger_period_us: 10000
+      narrow_trigger_period_us: 5000
 template_args:
   - Layout:
       width: 720
@@ -50,6 +54,7 @@ depends:
 
 #include "CameraBase.hpp"
 #include "DurationStatistics.hpp"
+#include "HikCameraProfileControl.hpp"
 #include "MvCameraControl.h"
 #include "app_framework.hpp"
 #include "libxr.hpp"
@@ -87,14 +92,20 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   static constexpr uint64_t microseconds_per_second = 1000000ULL;
   /// 当前实机使用的增益上限。
   static constexpr float max_gain = 16.0F;
-  /// 宽视场档位的触发周期。
-  static constexpr uint32_t wide_trigger_period_us = 10000U;
-  /// 窄视场档位的触发周期。
-  static constexpr uint32_t narrow_trigger_period_us = 5000U;
-  /// 宽视场档位的横向下采样倍率。
-  static constexpr uint32_t wide_decimation_x = 2U;
-  /// 宽视场档位的纵向下采样倍率。
-  static constexpr uint32_t wide_decimation_y = 2U;
+  /// 产品宽视场档位的默认触发周期。
+  static constexpr uint32_t default_wide_trigger_period_us = 10000U;
+  /// 产品窄视场档位的默认触发周期。
+  static constexpr uint32_t default_narrow_trigger_period_us = 5000U;
+  /// 产品宽视场档位的默认横向下采样倍率。
+  static constexpr uint32_t default_wide_decimation_x = 2U;
+  /// 产品宽视场档位的默认纵向下采样倍率。
+  static constexpr uint32_t default_wide_decimation_y = 2U;
+
+  /// 默认值的兼容名称；实际档位参数由 RuntimeParam 指定。
+  static constexpr uint32_t wide_trigger_period_us = default_wide_trigger_period_us;
+  static constexpr uint32_t narrow_trigger_period_us = default_narrow_trigger_period_us;
+  static constexpr uint32_t wide_decimation_x = default_wide_decimation_x;
+  static constexpr uint32_t wide_decimation_y = default_wide_decimation_y;
 
   static_assert(frame_layout.encoding == CameraTypes::Encoding::BGR8,
                 "HikCamera publishes BGR8 frames through MV_CC_GetImageForBGR");
@@ -123,6 +134,68 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     uint32_t grab_timeout_ms = 100;         ///< SDK 等待一帧图像的超时时间。
     uint32_t image_node_num = 3;            ///< SDK 内部取流缓存节点数。
     bool rotate_180 = false;  ///< true 时使用相机 ReverseX/Y 做 180 度旋转。
+    uint32_t wide_decimation_x = default_wide_decimation_x;  ///< WIDE 档横向下采样倍率。
+    uint32_t wide_decimation_y = default_wide_decimation_y;  ///< WIDE 档纵向下采样倍率。
+    uint32_t wide_trigger_period_us =
+        default_wide_trigger_period_us;  ///< WIDE 档外触发周期，单位 us。
+    uint32_t narrow_trigger_period_us =
+        default_narrow_trigger_period_us;  ///< NARROW 档外触发周期，单位 us。
+
+    RuntimeParam() = default;
+
+    constexpr RuntimeParam(std::string_view camera_name,
+                           std::string_view image_topic_name,
+                           std::string_view imu_topic_name, float gain,
+                           float exposure_time, bool external_trigger,
+                           float acquisition_frame_rate, uint32_t grab_timeout_ms,
+                           uint32_t image_node_num, bool rotate_180)
+        : camera_name(camera_name),
+          image_topic_name(image_topic_name),
+          imu_topic_name(imu_topic_name),
+          gain(gain),
+          exposure_time(exposure_time),
+          external_trigger(external_trigger),
+          acquisition_frame_rate(acquisition_frame_rate),
+          grab_timeout_ms(grab_timeout_ms),
+          image_node_num(image_node_num),
+          rotate_180(rotate_180)
+    {
+    }
+
+    /** 兼容旧 YAML 中位于 rotate_180 之前的两个下采样字段。 */
+    constexpr RuntimeParam(std::string_view camera_name,
+                           std::string_view image_topic_name,
+                           std::string_view imu_topic_name, float gain,
+                           float exposure_time, bool external_trigger,
+                           float acquisition_frame_rate, uint32_t grab_timeout_ms,
+                           uint32_t image_node_num, uint32_t decimation_horizontal,
+                           uint32_t decimation_vertical, bool rotate_180)
+        : RuntimeParam(camera_name, image_topic_name, imu_topic_name, gain, exposure_time,
+                       external_trigger, acquisition_frame_rate, grab_timeout_ms,
+                       image_node_num, rotate_180)
+    {
+      wide_decimation_x = decimation_horizontal;
+      wide_decimation_y = decimation_vertical;
+    }
+
+    constexpr RuntimeParam(std::string_view camera_name,
+                           std::string_view image_topic_name,
+                           std::string_view imu_topic_name, float gain,
+                           float exposure_time, bool external_trigger,
+                           float acquisition_frame_rate, uint32_t grab_timeout_ms,
+                           uint32_t image_node_num, bool rotate_180,
+                           uint32_t wide_decimation_x, uint32_t wide_decimation_y,
+                           uint32_t wide_trigger_period_us,
+                           uint32_t narrow_trigger_period_us)
+        : RuntimeParam(camera_name, image_topic_name, imu_topic_name, gain, exposure_time,
+                       external_trigger, acquisition_frame_rate, grab_timeout_ms,
+                       image_node_num, rotate_180)
+    {
+      this->wide_decimation_x = wide_decimation_x;
+      this->wide_decimation_y = wide_decimation_y;
+      this->wide_trigger_period_us = wide_trigger_period_us;
+      this->narrow_trigger_period_us = narrow_trigger_period_us;
+    }
   };
 
   /**
@@ -144,8 +217,8 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     runtime_.gain = ClampGain(runtime_.gain);
     XR_LOG_INFO("Starting HikCamera: external_trigger=%d rotate_180=%d",
                 runtime_.external_trigger ? 1 : 0, runtime_.rotate_180 ? 1 : 0);
-    if (!(CaptureStart() && InitializeProfiles() && StartGrabbing() &&
-          StartCaptureThread()))
+    if (!(ValidateRuntimeProfileConfig() && CaptureStart() && InitializeProfiles() &&
+          StartGrabbing() && StartCaptureThread()))
     {
       CaptureStop();
       throw std::runtime_error("HikCamera: failed to start camera");
@@ -204,7 +277,8 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   /**
    * @brief 停止 SDK 取流并阻塞切换到指定档位。
    *
-   * 调用方必须先停止外部触发。失败时采集线程保持停止，不回滚已经写入的 SDK 节点。
+   * 调用方必须先停止外部触发。同一目标最多尝试四次；每次确认 SDK 停流后
+   * 再写入配置并读回校验。超限时记录错误、保持采集线程停止且不修改 applied。
    */
   LibXR::ErrorCode SwitchProfile(ProfileId id, AppliedProfile& applied) override
   {
@@ -231,27 +305,61 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     }
     this->DiscardWritableImage();
 
-    if (camera_handle_ == nullptr)
+    const bool success = HikCameraDetail::RunProfileSwitchWithRetry(
+        [this, id, requested](uint32_t attempt)
+        {
+          const auto failed = [id, requested, attempt](const char* stage)
+          {
+            XR_LOG_ERROR(
+                "HikCamera switch profile=%u attempt=%u/4 stage=%s failed "
+                "target=%ux%u decimation=%ux%u period_us=%u",
+                static_cast<unsigned>(id), static_cast<unsigned>(attempt), stage,
+                requested->geometry.width, requested->geometry.height,
+                static_cast<unsigned>(requested->geometry.decimation_x),
+                static_cast<unsigned>(requested->geometry.decimation_y),
+                requested->trigger_period_us);
+            return false;
+          };
+          if (camera_handle_ == nullptr)
+          {
+            return failed("handle");
+          }
+          const int clear_result = MV_CC_ClearImageBuffer(camera_handle_);
+          const bool stopped = StopGrabbing();
+          if (clear_result != MV_OK || !stopped)
+          {
+            XR_LOG_ERROR("HikCamera prepare switch: clear=%d stopped=%d", clear_result,
+                         stopped ? 1 : 0);
+            return failed("stop/clear");
+          }
+          if (!ConfigureImageGeometry(id))
+          {
+            return failed("configure/readback");
+          }
+          if (!CameraTypes::SameFrameGeometry(frame_geometry_, requested->geometry))
+          {
+            XR_LOG_ERROR("HikCamera switch geometry mismatch: actual=%ux%u offset=%u,%u",
+                         frame_geometry_.width, frame_geometry_.height,
+                         frame_geometry_.roi_offset_x_native,
+                         frame_geometry_.roi_offset_y_native);
+            return failed("profile geometry");
+          }
+          if (!StartGrabbing())
+          {
+            return failed("start SDK");
+          }
+          if (!StartCaptureThread())
+          {
+            return failed("start capture thread");
+          }
+          return true;
+        });
+    if (!success)
     {
-      XR_LOG_ERROR("HikCamera failed to switch profile=%u; camera handle is null",
-                   static_cast<unsigned>(id));
-      return LibXR::ErrorCode::FAILED;
-    }
-    const int clear_result = MV_CC_ClearImageBuffer(camera_handle_);
-    const int stop_result = MV_CC_StopGrabbing(camera_handle_);
-    if (clear_result != MV_OK || stop_result != MV_OK)
-    {
-      XR_LOG_ERROR("HikCamera failed to stop profile=%u; clear=%d stop=%d",
-                   static_cast<unsigned>(id), clear_result, stop_result);
-      return LibXR::ErrorCode::FAILED;
-    }
-
-    if (!ConfigureImageGeometry(id) ||
-        !CameraTypes::SameFrameGeometry(frame_geometry_, requested->geometry) ||
-        !StartGrabbing() || !StartCaptureThread())
-    {
+      static_cast<void>(StopGrabbing());
       XR_LOG_ERROR(
-          "HikCamera failed to switch profile=%u; capture thread remains stopped",
+          "HikCamera profile=%u failed after 4 attempts; capture stopped, "
+          "developer intervention required",
           static_cast<unsigned>(id));
       return LibXR::ErrorCode::FAILED;
     }
@@ -276,15 +384,35 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     return gain;
   }
 
+  /**
+   * @brief 检查档位下采样和触发周期是否可用于相机配置。
+   */
+  bool ValidateRuntimeProfileConfig() const
+  {
+    if (runtime_.wide_decimation_x == 0U || runtime_.wide_decimation_y == 0U ||
+        runtime_.wide_trigger_period_us == 0U || runtime_.narrow_trigger_period_us == 0U)
+    {
+      XR_LOG_ERROR(
+          "HikCamera invalid profile config: wide_decimation=%ux%u "
+          "trigger_period_us=%u/%u",
+          runtime_.wide_decimation_x, runtime_.wide_decimation_y,
+          runtime_.wide_trigger_period_us, runtime_.narrow_trigger_period_us);
+      return false;
+    }
+    return true;
+  }
+
   bool InitializeProfiles()
   {
     const auto& calibration = this->Calibration();
     if (frame_geometry_.roi_offset_x_native != 0U ||
         frame_geometry_.roi_offset_y_native != 0U ||
-        frame_geometry_.decimation_x != wide_decimation_x ||
-        frame_geometry_.decimation_y != wide_decimation_y ||
-        calibration.native_width < frame_layout.width ||
-        calibration.native_height < frame_layout.height)
+        frame_geometry_.decimation_x != runtime_.wide_decimation_x ||
+        frame_geometry_.decimation_y != runtime_.wide_decimation_y ||
+        static_cast<uint64_t>(frame_geometry_.width) * frame_geometry_.decimation_x !=
+            calibration.native_width ||
+        static_cast<uint64_t>(frame_geometry_.height) * frame_geometry_.decimation_y !=
+            calibration.native_height)
     {
       XR_LOG_ERROR("HikCamera WIDE profile does not cover the native sensor");
       return false;
@@ -303,10 +431,10 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
     profiles_[0] = {.id = ProfileId::WIDE,
                     .geometry = frame_geometry_,
-                    .trigger_period_us = wide_trigger_period_us};
+                    .trigger_period_us = runtime_.wide_trigger_period_us};
     profiles_[1] = {.id = ProfileId::NARROW,
                     .geometry = narrow,
-                    .trigger_period_us = narrow_trigger_period_us};
+                    .trigger_period_us = runtime_.narrow_trigger_period_us};
     active_profile_ = ProfileId::WIDE;
     return true;
   }
@@ -570,8 +698,8 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     uint32_t decimation_y = 0U;
     if (profile == ProfileId::WIDE)
     {
-      decimation_x = wide_decimation_x;
-      decimation_y = wide_decimation_y;
+      decimation_x = runtime_.wide_decimation_x;
+      decimation_y = runtime_.wide_decimation_y;
     }
     else if (profile == ProfileId::NARROW)
     {
@@ -683,18 +811,18 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       return false;
     }
 
-    frame_geometry_ = {
-        .width = static_cast<uint32_t>(applied_width.nCurValue),
-        .height = static_cast<uint32_t>(applied_height.nCurValue),
-        .step = frame_layout.step,
-        .roi_offset_x_native = static_cast<uint32_t>(native_offset_x),
-        .roi_offset_y_native = static_cast<uint32_t>(native_offset_y),
-        .decimation_x = static_cast<uint16_t>(applied_decimation_horizontal_),
-        .decimation_y = static_cast<uint16_t>(applied_decimation_vertical_),
-        .flags = geometry_flags,
-        .reserved = 0,
-        .sample_phase_x_native = 0.0F,
-        .sample_phase_y_native = 0.0F,
+    frame_geometry_ = FrameGeometry{
+        static_cast<uint32_t>(applied_width.nCurValue),
+        static_cast<uint32_t>(applied_height.nCurValue),
+        frame_layout.step,
+        static_cast<uint32_t>(native_offset_x),
+        static_cast<uint32_t>(native_offset_y),
+        static_cast<uint16_t>(applied_decimation_horizontal_),
+        static_cast<uint16_t>(applied_decimation_vertical_),
+        geometry_flags,
+        0,
+        0.0F,
+        0.0F,
     };
     if (!CameraTypes::ValidateFrameGeometry(frame_layout, calibration, frame_geometry_))
     {
@@ -925,11 +1053,28 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       XR_LOG_ERROR("HikCamera MV_CC_StartGrabbing failed: %d", ret);
       return false;
     }
+    sdk_stream_.MarkStarted();
     return true;
   }
 
+  /** Stop the SDK only when a successful start still needs a matching stop. */
+  bool StopGrabbing()
+  {
+    return sdk_stream_.StopIfActive(
+        [this]()
+        {
+          const int result = MV_CC_StopGrabbing(camera_handle_);
+          if (result != MV_OK)
+          {
+            XR_LOG_ERROR("HikCamera MV_CC_StopGrabbing failed: %d", result);
+            return false;
+          }
+          return true;
+        });
+  }
+
   /**
-   * @brief 启动采集线程；创建失败时保持 SDK 取流停止。
+   * @brief 启动采集线程；创建失败时请求 SDK 停流，后续重试再次确认停流状态。
    */
   bool StartCaptureThread()
   {
@@ -943,7 +1088,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     catch (const std::system_error& error)
     {
       camera_state_.store(false, std::memory_order_release);
-      (void)MV_CC_StopGrabbing(camera_handle_);
+      static_cast<void>(StopGrabbing());
       XR_LOG_ERROR("HikCamera failed to create capture thread: %s", error.what());
       return false;
     }
@@ -1135,6 +1280,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
  private:
   RuntimeParam runtime_{};                     ///< 当前运行参数快照。
+  HikCameraDetail::SdkStreamState sdk_stream_{};  ///< SDK 已启动但尚未成功停止。
   void* camera_handle_{nullptr};               ///< Hik SDK 设备 handle。
   std::atomic<bool> camera_state_{false};      ///< 采集线程运行标志。
   std::thread capture_thread_{};               ///< 采集线程。

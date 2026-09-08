@@ -1,6 +1,6 @@
 # HikCamera
 
-HikCamera 从 Hikrobot USB 相机读取 BGR8 图像，并写入 `CameraBase<Info>`
+HikCamera 从 Hikrobot USB 相机读取 BGR8 图像，并写入 `CameraBase<FrameLayout>`
 提供的图像槽。
 
 本模块使用仓库内的 `hikSDK/include` 和 `hikSDK/lib` 构建。如果系统存在
@@ -8,15 +8,17 @@ HikCamera 从 Hikrobot USB 相机读取 BGR8 图像，并写入 `CameraBase<Info
 
 ## 相机信息
 
-模板参数 `Info` 必须描述相机实际输出图像：
+模板参数 `FrameLayout` 描述相机实际输出图像的固定存储布局：
 
 - `encoding` 必须是 `CameraTypes::Encoding::BGR8`
 - `step` 必须等于 `width * 3`
 - `width` 和 `height` 必须能被相机 SDK 接受
-- 使用下采样时，`Info` 写下采样后的图像尺寸和内参
+- 使用下采样时，`FrameLayout` 写下采样后的图像尺寸；`CameraCalibration`
+  始终保留原生传感器尺寸下的内参和畸变
 
-模块启动时会按 `Info.width` 和 `Info.height` 配置相机输出尺寸。目标尺寸小于
-相机可用最大尺寸时，模块会设置居中的 `OffsetX` 和 `OffsetY`。
+模块启动时会按 `FrameLayout.width`、`FrameLayout.height` 和 WIDE 下采样倍率
+配置相机。默认产品配置使用 `720x540 / 2x2` 覆盖完整 `1440x1080` 传感器；
+标定配置可显式使用 `1440x1080 / 1x1`。NARROW 档固定使用 `1x1` 居中 ROI。
 
 ## 时间戳
 
@@ -48,9 +50,17 @@ DeviceTimestampIncrement
 - `acquisition_frame_rate`：自由运行帧率
 - `grab_timeout_ms`：SDK 等待一帧图像的超时时间
 - `image_node_num`：SDK 取流缓存节点数
-- `decimation_horizontal`：横向下采样倍率，`1` 表示不下采样
-- `decimation_vertical`：纵向下采样倍率，`1` 表示不下采样
 - `rotate_180`：是否使用相机 `ReverseX` 和 `ReverseY` 旋转图像
+- `wide_decimation_x`：WIDE 档横向下采样倍率，默认 `2`
+- `wide_decimation_y`：WIDE 档纵向下采样倍率，默认 `2`
+- `wide_trigger_period_us`：WIDE 档外触发周期，默认 `10000 us`
+- `narrow_trigger_period_us`：NARROW 档外触发周期，默认 `5000 us`
+
+下采样倍率和触发周期必须大于零。标定配置应使用 `1x1` 和较低的真实外触发
+频率；只降低预览帧率不能减少相机与同步链路负载。
+
+运行参数仍兼容旧生成配置中位于 `rotate_180` 之前的
+`decimation_horizontal/decimation_vertical` 两项；新配置统一使用上述 WIDE 字段。
 
 `external_trigger = true` 时使用：
 
@@ -61,6 +71,13 @@ TriggerActivation = RisingEdge
 ```
 
 `external_trigger = false` 时关闭触发，并配置 `AcquisitionFrameRate`。
+
+## 档位切换失败
+
+`SwitchProfile` 要求调用方先停止外部触发。同一目标配置最多尝试四次
+（首次加三次重试）；每次确认 SDK 停流后写入配置、读回校验，再启动采集。
+超限会记录失败步骤和目标参数，返回失败并保持 `applied` 不变；不会自动
+切换到其他档位。`CameraFrameSync` 收到失败后不发送新的 START，等待开发者处理。
 
 ## 图像旋转
 
