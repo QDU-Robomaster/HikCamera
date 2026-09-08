@@ -27,6 +27,9 @@ constructor_args:
       wide_decimation_y: 2
       wide_trigger_period_us: 10000
       narrow_trigger_period_us: 5000
+      adc_bit_depth: std::nullopt
+      gamma_enabled: false
+      gamma: 1.0
 template_args:
   - Layout:
       width: 720
@@ -43,8 +46,10 @@ depends:
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -119,9 +124,16 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   static_assert(Base::image_bytes % channel_count == 0,
                 "HikCamera expects complete BGR pixels");
 
-  /**
-   * @brief xrobot YAML 传入的运行时参数。
-   */
+  /** @brief 传感器 ADC 位深；SDK 数值在驱动内部转换。 */
+  enum class AdcBitDepth : uint32_t
+  {
+    BIT_8 = 8,
+    BIT_10 = 10,
+    BIT_11 = 11,
+    BIT_12 = 12,
+  };
+
+  /** @brief xrobot YAML 传入的运行时参数。 */
   struct RuntimeParam
   {
     std::string_view camera_name = "camera";             ///< CameraBase 相机名。
@@ -139,7 +151,10 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     uint32_t wide_trigger_period_us =
         default_wide_trigger_period_us;  ///< WIDE 档外触发周期，单位 us。
     uint32_t narrow_trigger_period_us =
-        default_narrow_trigger_period_us;  ///< NARROW 档外触发周期，单位 us。
+        default_narrow_trigger_period_us;        ///< NARROW 档外触发周期，单位 us。
+    std::optional<AdcBitDepth> adc_bit_depth{};  ///< 未指定时保留设备 ADC 位深。
+    bool gamma_enabled = false;  ///< true 时设置 User Gamma，false 时不改 Gamma 节点。
+    float gamma = 1.0F;          ///< User Gamma 请求值，须有限且在设备支持范围内。
 
     RuntimeParam() = default;
 
@@ -148,7 +163,9 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
                            std::string_view imu_topic_name, float gain,
                            float exposure_time, bool external_trigger,
                            float acquisition_frame_rate, uint32_t grab_timeout_ms,
-                           uint32_t image_node_num, bool rotate_180)
+                           uint32_t image_node_num, bool rotate_180,
+                           std::optional<AdcBitDepth> adc_bit_depth = std::nullopt,
+                           bool gamma_enabled = false, float gamma = 1.0F)
         : camera_name(camera_name),
           image_topic_name(image_topic_name),
           imu_topic_name(imu_topic_name),
@@ -158,7 +175,10 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
           acquisition_frame_rate(acquisition_frame_rate),
           grab_timeout_ms(grab_timeout_ms),
           image_node_num(image_node_num),
-          rotate_180(rotate_180)
+          rotate_180(rotate_180),
+          adc_bit_depth(adc_bit_depth),
+          gamma_enabled(gamma_enabled),
+          gamma(gamma)
     {
     }
 
@@ -169,10 +189,12 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
                            float exposure_time, bool external_trigger,
                            float acquisition_frame_rate, uint32_t grab_timeout_ms,
                            uint32_t image_node_num, uint32_t decimation_horizontal,
-                           uint32_t decimation_vertical, bool rotate_180)
+                           uint32_t decimation_vertical, bool rotate_180,
+                           std::optional<AdcBitDepth> adc_bit_depth = std::nullopt,
+                           bool gamma_enabled = false, float gamma = 1.0F)
         : RuntimeParam(camera_name, image_topic_name, imu_topic_name, gain, exposure_time,
                        external_trigger, acquisition_frame_rate, grab_timeout_ms,
-                       image_node_num, rotate_180)
+                       image_node_num, rotate_180, adc_bit_depth, gamma_enabled, gamma)
     {
       wide_decimation_x = decimation_horizontal;
       wide_decimation_y = decimation_vertical;
@@ -186,10 +208,12 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
                            uint32_t image_node_num, bool rotate_180,
                            uint32_t wide_decimation_x, uint32_t wide_decimation_y,
                            uint32_t wide_trigger_period_us,
-                           uint32_t narrow_trigger_period_us)
+                           uint32_t narrow_trigger_period_us,
+                           std::optional<AdcBitDepth> adc_bit_depth = std::nullopt,
+                           bool gamma_enabled = false, float gamma = 1.0F)
         : RuntimeParam(camera_name, image_topic_name, imu_topic_name, gain, exposure_time,
                        external_trigger, acquisition_frame_rate, grab_timeout_ms,
-                       image_node_num, rotate_180)
+                       image_node_num, rotate_180, adc_bit_depth, gamma_enabled, gamma)
     {
       this->wide_decimation_x = wide_decimation_x;
       this->wide_decimation_y = wide_decimation_y;
@@ -959,9 +983,205 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     reverse_state_saved_ = false;
   }
 
-  /**
-   * @brief 枚举 USB 相机、打开设备并配置采集参数。
-   */
+  /** @brief 显式设置 ADC 位深，保存原值并读回确认。 */
+  bool ConfigureAdcBitDepth()
+  {
+    if (!runtime_.adc_bit_depth)
+    {
+      return true;
+    }
+    unsigned int requested = 0U;
+    switch (*runtime_.adc_bit_depth)
+    {
+      case AdcBitDepth::BIT_8:
+        requested = 0U;
+        break;
+      case AdcBitDepth::BIT_10:
+        requested = 1U;
+        break;
+      case AdcBitDepth::BIT_11:
+        requested = 2U;
+        break;
+      case AdcBitDepth::BIT_12:
+        requested = 3U;
+        break;
+      default:
+        XR_LOG_ERROR("HikCamera invalid ADC bit depth: %u",
+                     static_cast<unsigned>(*runtime_.adc_bit_depth));
+        return false;
+    }
+    MVCC_ENUMVALUE original{};
+    if (!GetEnumValue("ADCBitDepth", original))
+    {
+      return false;
+    }
+    old_adc_bit_depth_ = original.nCurValue;
+    if (!SetEnumValue("ADCBitDepth", requested))
+    {
+      return false;
+    }
+    MVCC_ENUMVALUE applied{};
+    if (!GetEnumValue("ADCBitDepth", applied) || applied.nCurValue != requested)
+    {
+      XR_LOG_ERROR("HikCamera ADC readback mismatch: requested=%u applied=%u", requested,
+                   applied.nCurValue);
+      return false;
+    }
+    return true;
+  }
+
+  /** @brief 恢复已保存的 ADC 设置，失败时保留错误日志。 */
+  void RestoreAdcBitDepth()
+  {
+    if (old_adc_bit_depth_)
+    {
+      if (!SetEnumValue("ADCBitDepth", *old_adc_bit_depth_))
+      {
+        XR_LOG_ERROR("HikCamera failed to restore ADC bit depth");
+      }
+      old_adc_bit_depth_.reset();
+    }
+  }
+
+  /** @brief 配置 User Gamma；任何新值写入前都必须保存原值。 */
+  bool ConfigureGamma()
+  {
+    if (!runtime_.gamma_enabled)
+    {
+      return true;
+    }
+    if (!std::isfinite(runtime_.gamma))
+    {
+      XR_LOG_ERROR("HikCamera requires finite User Gamma");
+      return false;
+    }
+    MVCC_ENUMVALUE selector{};
+    auto ret = MV_CC_GetGammaSelector(camera_handle_, &selector);
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("HikCamera failed to read GammaSelector: %d", ret);
+      return false;
+    }
+    if (selector.nCurValue != MV_GAMMA_SELECTOR_USER)
+    {
+      old_gamma_selector_ = selector.nCurValue;
+      ret = MV_CC_SetGammaSelector(camera_handle_, MV_GAMMA_SELECTOR_USER);
+      if (ret != MV_OK)
+      {
+        XR_LOG_ERROR("HikCamera failed to select User Gamma: %d", ret);
+        return false;
+      }
+    }
+    MVCC_FLOATVALUE original{};
+    ret = MV_CC_GetGamma(camera_handle_, &original);
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("HikCamera failed to save original User Gamma: %d", ret);
+      return false;
+    }
+    if (runtime_.gamma < original.fMin || runtime_.gamma > original.fMax)
+    {
+      XR_LOG_ERROR("HikCamera Gamma %.3f outside device range [%.3f, %.3f]",
+                   runtime_.gamma, original.fMin, original.fMax);
+      return false;
+    }
+    old_gamma_value_ = original.fCurValue;
+    ret = MV_CC_SetGamma(camera_handle_, runtime_.gamma);
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("HikCamera failed to set User Gamma: %d", ret);
+      return false;
+    }
+    return true;
+  }
+
+  /** @brief 先恢复 User Gamma 值，再恢复原选择器；两项独立尝试。 */
+  void RestoreGamma()
+  {
+    if (old_gamma_value_)
+    {
+      const auto ret = MV_CC_SetGamma(camera_handle_, *old_gamma_value_);
+      if (ret != MV_OK)
+      {
+        XR_LOG_ERROR("HikCamera failed to restore User Gamma: %d", ret);
+      }
+      old_gamma_value_.reset();
+    }
+    if (old_gamma_selector_)
+    {
+      const auto ret = MV_CC_SetGammaSelector(camera_handle_, *old_gamma_selector_);
+      if (ret != MV_OK)
+      {
+        XR_LOG_ERROR("HikCamera failed to restore GammaSelector: %d", ret);
+      }
+      old_gamma_selector_.reset();
+    }
+  }
+
+  /** @brief 自由运行时开启已有帧率控制，保存原开关和帧率。 */
+  bool ConfigureFrameRate()
+  {
+    MVCC_FLOATVALUE original{};
+    if (!GetBoolValue("AcquisitionFrameRateEnable", old_frame_rate_enabled_))
+    {
+      XR_LOG_ERROR("HikCamera failed to save frame-rate enable state");
+      return false;
+    }
+    const auto ret =
+        MV_CC_GetFloatValue(camera_handle_, "AcquisitionFrameRate", &original);
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("HikCamera failed to save frame rate: %d", ret);
+      return false;
+    }
+    old_frame_rate_ = original.fCurValue;
+    frame_rate_state_saved_ = true;
+    if (!SetBoolValue("AcquisitionFrameRateEnable", true) ||
+        !SetFloatValue("AcquisitionFrameRate", runtime_.acquisition_frame_rate))
+    {
+      XR_LOG_ERROR("HikCamera failed to configure free-run frame rate");
+      return false;
+    }
+    return true;
+  }
+
+  /** @brief 恢复帧率后再恢复使能开关，避免关闭后帧率节点不可写。 */
+  void RestoreFrameRate()
+  {
+    if (!frame_rate_state_saved_)
+    {
+      return;
+    }
+    if (!SetFloatValue("AcquisitionFrameRate", old_frame_rate_))
+    {
+      XR_LOG_ERROR("HikCamera failed to restore frame rate");
+    }
+    if (!SetBoolValue("AcquisitionFrameRateEnable", old_frame_rate_enabled_))
+    {
+      XR_LOG_ERROR("HikCamera failed to restore frame-rate enable state");
+    }
+    frame_rate_state_saved_ = false;
+  }
+
+  /** @brief 关闭自动曝光；仅明确不支持该功能时跳过。 */
+  bool DisableAutoExposure()
+  {
+    const auto ret =
+        MV_CC_SetEnumValue(camera_handle_, "ExposureAuto", MV_EXPOSURE_AUTO_MODE_OFF);
+    if (ret == static_cast<int>(MV_E_SUPPORT))
+    {
+      XR_LOG_WARN("HikCamera ExposureAuto is unsupported; applying manual exposure");
+      return true;
+    }
+    if (ret != MV_OK)
+    {
+      XR_LOG_ERROR("HikCamera failed to disable ExposureAuto: %d", ret);
+      return false;
+    }
+    return true;
+  }
+
+  /** @brief 枚举 USB 相机、打开设备并配置采集参数。 */
   bool CaptureStart()
   {
     MV_CC_DEVICE_INFO_LIST device_list{};
@@ -986,7 +1206,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       return false;
     }
 
-    if (!ConfigureImageGeometry(ProfileId::WIDE))
+    if (!ConfigureAdcBitDepth() || !ConfigureImageGeometry(ProfileId::WIDE))
     {
       return false;
     }
@@ -1012,22 +1232,20 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
         return false;
       }
     }
-    else if (!SetEnumValue("TriggerMode", 0) ||
-             !SetFloatValue("AcquisitionFrameRate", runtime_.acquisition_frame_rate))
+    else if (!SetEnumValue("TriggerMode", 0) || !ConfigureFrameRate())
     {
       return false;
     }
 
     if (!SetEnumValue("BalanceWhiteAuto", MV_BALANCEWHITE_AUTO_CONTINUOUS) ||
-        !SetEnumValue("ExposureAuto", MV_EXPOSURE_AUTO_MODE_OFF) ||
-        !SetEnumValue("GainAuto", MV_GAIN_MODE_OFF) ||
+        !DisableAutoExposure() || !SetEnumValue("GainAuto", MV_GAIN_MODE_OFF) ||
         !SetFloatValue("ExposureTime", runtime_.exposure_time) ||
         !SetFloatValue("Gain", runtime_.gain))
     {
       return false;
     }
 
-    if (!ConfigureRotation())
+    if (!ConfigureGamma() || !ConfigureRotation())
     {
       return false;
     }
@@ -1104,8 +1322,11 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       return;
     }
     (void)MV_CC_StopGrabbing(camera_handle_);
+    RestoreGamma();
+    RestoreAdcBitDepth();
     RestoreDeviceRotation();
     RestoreImageGeometry();
+    RestoreFrameRate();
     (void)MV_CC_CloseDevice(camera_handle_);
     (void)MV_CC_DestroyHandle(camera_handle_);
     camera_handle_ = nullptr;
@@ -1279,13 +1500,19 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   static void CaptureThreadMain(Self* self) { self->CaptureLoop(); }
 
  private:
-  RuntimeParam runtime_{};                     ///< 当前运行参数快照。
+  RuntimeParam runtime_{};                            ///< 当前运行参数快照。
+  std::optional<unsigned int> old_adc_bit_depth_{};   ///< 原 ADC 值及待恢复状态。
+  std::optional<unsigned int> old_gamma_selector_{};  ///< 改动前的 Gamma 选择器。
+  std::optional<float> old_gamma_value_{};        ///< 写入新 User Gamma 前保存的原值。
+  bool frame_rate_state_saved_{false};            ///< 自由运行帧率及开关需要恢复。
+  bool old_frame_rate_enabled_{false};            ///< 原帧率控制开关。
+  float old_frame_rate_{};                        ///< 原自由运行帧率。
   HikCameraDetail::SdkStreamState sdk_stream_{};  ///< SDK 已启动但尚未成功停止。
-  void* camera_handle_{nullptr};               ///< Hik SDK 设备 handle。
-  std::atomic<bool> camera_state_{false};      ///< 采集线程运行标志。
-  std::thread capture_thread_{};               ///< 采集线程。
-  bool capture_thread_created_{false};         ///< 线程是否已创建。
-  bool device_rotate_180_{false};              ///< 当前是否由相机完成 180 度旋转。
+  void* camera_handle_{nullptr};                  ///< Hik SDK 设备 handle。
+  std::atomic<bool> camera_state_{false};         ///< 采集线程运行标志。
+  std::thread capture_thread_{};                  ///< 采集线程。
+  bool capture_thread_created_{false};            ///< 线程是否已创建。
+  bool device_rotate_180_{false};                 ///< 当前是否由相机完成 180 度旋转。
   bool reverse_state_saved_{false};            ///< 是否保存过 ReverseX / ReverseY 原值。
   bool geometry_state_saved_{false};           ///< 是否保存过宽高和偏移原值。
   bool decimation_state_saved_{false};         ///< 是否保存过下采样原值。
@@ -1306,6 +1533,6 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   ProfileId active_profile_{ProfileId::WIDE};  ///< 当前成功生效的档位。
   uint64_t device_timestamp_frequency_hz_{microseconds_per_second};  ///< 设备时间戳频率。
   XRobot::DurationStatistics frame_capture_duration_{};
-  std::atomic<uint32_t> frames_committed_{0};                        ///< 已提交帧数。
-  std::atomic<uint32_t> failure_count_{0};                           ///< 失败帧数。
+  std::atomic<uint32_t> frames_committed_{0};  ///< 已提交帧数。
+  std::atomic<uint32_t> failure_count_{0};     ///< 失败帧数。
 };
