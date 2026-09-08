@@ -55,6 +55,19 @@ DeviceTimestampIncrement
 - `wide_decimation_y`：WIDE 档纵向下采样倍率，默认 `2`
 - `wide_trigger_period_us`：WIDE 档外触发周期，默认 `10000 us`
 - `narrow_trigger_period_us`：NARROW 档外触发周期，默认 `5000 us`
+- `adc_bit_depth`：可选 `AdcBitDepth::BIT_8 / BIT_10 / BIT_11 / BIT_12`；默认
+  `std::nullopt`，不改设备 ADC。显式配置时保存原值、设置并读回，失败则停止初始化。
+- `gamma_enabled`：默认 `false`，不改设备 Gamma；`true` 时设置 User Gamma。
+- `gamma`：默认 `1.0`；开启时必须有限且在 SDK 报告的 User Gamma 范围内，否则初始化
+  报错，不截断或替换请求值。
+
+新增参数放在运行参数末尾，已有构造布局和默认参数保留。ADC 不改变 BGR8 输出合约，
+也不会额外改写相机原生 PixelFormat。YAML 表达式可使用具体相机模板的枚举，例如
+`{expr: 'HikCamera<ProjectConstexpr::MainFrameLayout>::AdcBitDepth::BIT_8'}`。
+
+Gamma 配置先保存选择器，必要时切到 User，再读取并保存原 User Gamma；未能保存原值
+时不会写入新值。退出或后续初始化失败时尝试恢复已修改的 ADC、Gamma 值及选择器；
+恢复错误会打印日志，设备断连时不保证可以完成恢复。
 
 下采样倍率和触发周期必须大于零。标定配置应使用 `1x1` 和较低的真实外触发
 频率；只降低预览帧率不能减少相机与同步链路负载。
@@ -70,7 +83,12 @@ TriggerSource = Line0
 TriggerActivation = RisingEdge
 ```
 
-`external_trigger = false` 时关闭触发，并配置 `AcquisitionFrameRate`。
+`external_trigger = false` 时关闭触发，模块自动开启 SDK 的
+`AcquisitionFrameRateEnable` 并配置已有的 `acquisition_frame_rate`，不需要额外 YAML
+开关。退出时恢复原帧率和使能状态。实际帧率仍受曝光、读出和传输能力约束。
+
+初始化会关闭 `ExposureAuto` 并设置手动曝光时间。仅 SDK 明确返回 `MV_E_SUPPORT`
+时跳过关闭自动曝光这一步；超时、访问错误等仍导致初始化失败。
 
 ## 档位切换失败
 
