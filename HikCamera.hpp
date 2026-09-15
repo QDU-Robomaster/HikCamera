@@ -3,44 +3,11 @@
 // clang-format off
 /* === MODULE MANIFEST V2 ===
 module_description: Hikrobot USB 相机采集模块，向 CameraBase 图像槽写入图像
-constructor_args:
-  - calibration:
-      native_width: 1440
-      native_height: 1080
-      camera_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 1.0]
-      distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
-      distortion_coefficients: [-0.091821039187099038, 0.46399073468302049, 0.0026098786426372819, 0.0009819586010405485, -0.47512788503104569]
-      rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-      projection_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 0.0, 1.0, 0.0]
-  - runtime:
-      camera_name: "camera"
-      image_topic_name: "camera_image"
-      imu_topic_name: "camera_imu"
-      gain: 16.0
-      exposure_time: 2000.0
-      external_trigger: true
-      acquisition_frame_rate: 249.0
-      grab_timeout_ms: 100
-      image_node_num: 3
-      rotate_180: false
-      wide_decimation_x: 2
-      wide_decimation_y: 2
-      wide_trigger_period_us: 10000
-      narrow_trigger_period_us: 5000
-      adc_bit_depth: std::nullopt
-      gamma_enabled: false
-      gamma: 1.0
-template_args:
-  - Layout:
-      width: 720
-      height: 540
-      step: 2160
-      encoding: CameraTypes::Encoding::BGR8
-required_hardware:
-  - Hikrobot USB camera
 depends:
-  - qdu-future/CameraBase
-  - xrobot-org/DurationStatistics
+- id: QDU-Robomaster/CameraBase
+  ref: same-or-dev
+- id: xrobot-org/DurationStatistics
+  ref: same-or-dev
 === END MANIFEST === */
 // clang-format on
 
@@ -61,9 +28,9 @@ depends:
 #include "DurationStatistics.hpp"
 #include "HikCameraProfileControl.hpp"
 #include "MvCameraControl.h"
-#include "app_framework.hpp"
 #include "libxr.hpp"
 #include "logger.hpp"
+#include "ramfs.hpp"
 #include "thread.hpp"
 
 /**
@@ -75,7 +42,7 @@ depends:
  * @tparam FrameLayoutV 相机输出图像的固定存储容量和像素格式。
  */
 template <CameraTypes::FrameLayout FrameLayoutV>
-class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
+class HikCamera : public CameraBase<FrameLayoutV>
 {
  public:
   using Self = HikCamera<FrameLayoutV>;                        ///< 当前模板实例类型。
@@ -225,16 +192,14 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   /**
    * @brief 打开相机、配置参数并启动采集线程。
    *
-   * @param hw 硬件容器，传给 `CameraBase` 注册 RamFS 命令。
-   * @param app 应用管理器。
    * @param calibration 原生传感器坐标系下的相机标定。
    * @param runtime 运行时相机参数。
    *
    * 配置或开始取流失败时会抛出 `std::runtime_error`。
    */
-  explicit HikCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                     CameraCalibration calibration, RuntimeParam runtime)
-      : Base(hw, calibration, runtime.camera_name, runtime.image_topic_name,
+  explicit HikCamera(LibXR::RamFS& external_ramfs, CameraCalibration calibration,
+                     RuntimeParam runtime)
+      : Base(external_ramfs, calibration, runtime.camera_name, runtime.image_topic_name,
              runtime.imu_topic_name),
         runtime_(runtime)
   {
@@ -247,7 +212,6 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       CaptureStop();
       throw std::runtime_error("HikCamera: failed to start camera");
     }
-    app.Register(*this);
   }
 
   /**
@@ -264,7 +228,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     CaptureStop();
   }
 
-  void OnMonitor() override
+  void OnMonitor()
   {
     const auto frame_capture = frame_capture_duration_.GetSummary();
     XR_LOG_INFO("HikCamera monitor: frames=%u failures=%u",
