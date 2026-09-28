@@ -10,11 +10,11 @@ typedef char    bool;
 #define false   0
 #endif
 
-/// \~chinese
-/// 设备类型定义
+/// \~chinese 
+/// 设备类型定义     
 /// \~english
 /// Device Type Definition
-#define MV_UNKNOW_DEVICE        0x00000000          ///< \~chinese 未知设备类型，保留意义       \~english Unknown Device Type, Reserved
+#define MV_UNKNOW_DEVICE        0x00000000          ///< \~chinese 未知设备类型，保留意义       \~english Unknown Device Type, Reserved 
 #define MV_GIGE_DEVICE          0x00000001          ///< \~chinese GigE设备                     \~english GigE Device
 #define MV_1394_DEVICE          0x00000002          ///< \~chinese 1394-a/b 设备                \~english 1394-a/b Device
 #define MV_USB_DEVICE           0x00000004          ///< \~chinese USB 设备                     \~english USB Device
@@ -23,17 +23,17 @@ typedef char    bool;
 /// \~chinese GigE设备信息         \~english GigE device info
 typedef struct _MV_GIGE_DEVICE_INFO_
 {
-    unsigned int        nIpCfgOption;
-    unsigned int        nIpCfgCurrent;              ///< \~chinese       \~english IP configuration:bit31-static bit30-dhcp bit29-lla
+    unsigned int        nIpCfgOption;        
+    unsigned int        nIpCfgCurrent;              ///< \~chinese       \~english IP configuration:bit31-static bit30-dhcp bit29-lla      
     unsigned int        nCurrentIp;
-    unsigned int        nCurrentSubNetMask;         ///< \~chinese       \~english curtent subnet mask
+    unsigned int        nCurrentSubNetMask;         ///< \~chinese       \~english curtent subnet mask     
     unsigned int        nDefultGateWay;             ///< \~chinese       \~english current gateway
     unsigned char       chManufacturerName[32];
     unsigned char       chModelName[32];
     unsigned char       chDeviceVersion[32];
     unsigned char       chManufacturerSpecificInfo[48];
     unsigned char       chSerialNumber[16];
-    unsigned char       chUserDefinedName[16];
+    unsigned char       chUserDefinedName[16]; 
     unsigned int        nNetExport;                 ///< \~chinese 网口IP地址       \~english NetWork IP Address
 
     unsigned int        nReserved[4];
@@ -98,7 +98,7 @@ typedef struct _MV_CC_DEVICE_INFO_
     union
     {
         MV_GIGE_DEVICE_INFO stGigEInfo;
-        MV_USB3_DEVICE_INFO stUsb3VInfo;
+        MV_USB3_DEVICE_INFO stUsb3VInfo; 
         MV_CamL_DEV_INFO    stCamLInfo;
         // more ...
     }SpecialInfo;
@@ -618,7 +618,7 @@ typedef struct _MV_ALL_MATCH_INFO_
 /// \~en:Network traffic and packet loss feedback structure, the corresponding type is MV_MATCH_TYPE_NET_DETECT
 typedef struct _MV_MATCH_INFO_NET_DETECT_
 {
-    int64_t             nReviceDataSize;    ///< \~chinese 已接收数据大小  [统计StartGrabbing和StopGrabbing之间的数据量]\~english Received data size
+    int64_t             nReviceDataSize;    ///< \~chinese 已接收数据大小  [统计StartGrabbing和StopGrabbing之间的数据量]\~english Received data size 
     int64_t             nLostPacketCount;   ///< \~chinese 丢失的包数量\~english Number of packets lost
     unsigned int        nLostFrameCount;    ///< \~chinese 丢帧数量\~english Number of frames lost
     unsigned int        nNetRecvFrameCount;          ///< \~chinese 保留\~english Reserved
@@ -687,7 +687,7 @@ typedef struct _MV_IMAGE_BASIC_INFO_
 /* Package of GenICam C interface-related parameters definition         */
 /************************************************************************/
 
-/// \~chinese 每个节点对应的接口类型\~english Interface type corresponds to each node
+/// \~chinese 每个节点对应的接口类型\~english Interface type corresponds to each node 
 enum MV_XML_InterfaceType
 {
     IFT_IValue,         //!> IValue interface
