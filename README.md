@@ -46,13 +46,7 @@ DeviceTimestampIncrement
 
 `DeviceTimestampIncrement` 作为设备 tick 频率（Hz），用于把设备 tick 换算成微秒；该节点不可用时按 1 MHz（tick 即微秒）处理并打印警告。没有设备时间戳的帧被丢弃。`nHostTimeStamp` 只用于日志。
 
-`ImageFrame::timestamp_us` comes from the device timestamp in the Hikrobot frame information. The code reads:
-
-```text
-nDevTimeStampHigh
-nDevTimeStampLow
-DeviceTimestampIncrement
-```
+`ImageFrame::timestamp_us` comes from the device timestamp in the Hikrobot frame information. The code reads the three fields listed in the code block above.
 
 `DeviceTimestampIncrement` is taken as the device tick frequency (Hz) and converts the device ticks to microseconds; when the node is unavailable, 1 MHz (one tick per microsecond) is assumed and a warning is printed. A frame without a device timestamp is discarded. `nHostTimeStamp` is used for logging only.
 
@@ -74,13 +68,7 @@ TriggerActivation = RisingEdge
 
 退出或后续初始化失败时，尝试恢复已修改的 ADC、Gamma 值及选择器、旋转、几何和帧率，恢复错误打印到日志。
 
-With `external_trigger = true` the camera uses:
-
-```text
-TriggerMode = On
-TriggerSource = Line0
-TriggerActivation = RisingEdge
-```
+With `external_trigger = true` the camera uses the settings in the code block above.
 
 With `external_trigger = false` the trigger is off, and the Module enables the SDK `AcquisitionFrameRateEnable` and configures `acquisition_frame_rate`; the original frame rate and enable state are restored on exit. The actual frame rate is bounded by the exposure, readout and transfer capability.
 
@@ -105,8 +93,8 @@ On exit or a later initialization failure, the Module tries to restore the modif
 继承自 `CameraBase` 的 RamFS 命令（文件名为 `camera_name`）用于调整曝光和增益：
 
 ```text
-set_exposure <微秒>
-set_gain <值>
+set_exposure <microseconds>
+set_gain <value>
 ```
 
 The capture thread (`std::thread`) proceeds as follows:
@@ -119,12 +107,7 @@ The capture thread (`std::thread`) proceeds as follows:
 
 A failed grab, a size mismatch or a missing device timestamp counts as a failure and the frame is not committed. The first committed frame prints the device and host timestamps, the frame count and the lost-packet count. `OnMonitor()` prints the committed frame count, the failed frame count and the per-frame capture duration statistics in us.
 
-The RamFS command inherited from `CameraBase` (file name `camera_name`) adjusts exposure and gain:
-
-```text
-set_exposure <microseconds>
-set_gain <value>
-```
+The RamFS command inherited from `CameraBase` (file name `camera_name`) adjusts exposure and gain, with the commands in the code block above.
 
 ## 6. 构造接口 / Constructor
 
