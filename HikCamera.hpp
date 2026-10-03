@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: Hikrobot USB 相机采集模块，向 CameraBase 图像槽写入图像
+module_description: Hikrobot USB 相机采集模块：读取 BGR8 图像并写入 CameraBase 图像槽 / Hikrobot USB camera capture Module that reads BGR8 images into the CameraBase image slots
 depends:
 - id: QDU-Robomaster/CameraBase
   ref: same-or-dev
@@ -62,7 +62,7 @@ class HikCamera : public CameraBase<FrameLayoutV>
   static constexpr std::size_t frame_step = static_cast<std::size_t>(frame_layout.step);
   /// 一秒对应的微秒数。
   static constexpr uint64_t microseconds_per_second = 1000000ULL;
-  /// 当前实机使用的增益上限。
+  /// 增益上限。
   static constexpr float max_gain = 16.0F;
   /// 产品宽视场档位的默认触发周期。
   static constexpr uint32_t default_wide_trigger_period_us = 10000U;
@@ -73,7 +73,7 @@ class HikCamera : public CameraBase<FrameLayoutV>
   /// 产品宽视场档位的默认纵向下采样倍率。
   static constexpr uint32_t default_wide_decimation_y = 2U;
 
-  /// 默认值的兼容名称；实际档位参数由 RuntimeParam 指定。
+  /// 档位参数的默认值；实际值由 RuntimeParam 指定。
   static constexpr uint32_t wide_trigger_period_us = default_wide_trigger_period_us;
   static constexpr uint32_t narrow_trigger_period_us = default_narrow_trigger_period_us;
   static constexpr uint32_t wide_decimation_x = default_wide_decimation_x;
@@ -104,8 +104,8 @@ class HikCamera : public CameraBase<FrameLayoutV>
   struct RuntimeParam
   {
     std::string_view camera_name = "camera";             ///< CameraBase 相机名。
-    std::string_view image_topic_name = "camera_image";  ///< 图像共享话题名。
-    std::string_view imu_topic_name = "camera_imu";      ///< 同步后 IMU 话题名。
+    std::string_view image_topic_name = "camera_image";  ///< 图像 Topic 名。
+    std::string_view imu_topic_name = "camera_imu";      ///< 同步后的 IMU Topic 名。
     float gain = 16.0F;                                  ///< 相机增益。
     float exposure_time = 2000.0F;                       ///< 曝光时间，单位微秒。
     bool external_trigger = true;           ///< true 时使用 Line0 上升沿外触发。
@@ -149,7 +149,7 @@ class HikCamera : public CameraBase<FrameLayoutV>
     {
     }
 
-    /** 兼容旧 YAML 中位于 rotate_180 之前的两个下采样字段。 */
+    /** 下采样字段 `decimation_horizontal`、`decimation_vertical` 位于 `rotate_180` 之前的形式。 */
     constexpr RuntimeParam(std::string_view camera_name,
                            std::string_view image_topic_name,
                            std::string_view imu_topic_name, float gain,
@@ -189,6 +189,10 @@ class HikCamera : public CameraBase<FrameLayoutV>
     }
   };
 
+  static CameraCalibration DefaultCalibration() { return {.native_width = 1440, .native_height = 1080, .camera_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 1.0}, .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB, .distortion_coefficients = {-0.09182103918709904, 0.4639907346830205, 0.002609878642637282, 0.0009819586010405485, -0.4751278850310457}, .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, .projection_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 0.0, 1.0, 0.0}}; }
+
+  static RuntimeParam DefaultRuntime() { return {}; }
+
   /**
    * @brief 打开相机、配置参数并启动采集线程。
    *
@@ -197,10 +201,6 @@ class HikCamera : public CameraBase<FrameLayoutV>
    *
    * 配置或开始取流失败时会抛出 `std::runtime_error`。
    */
-  static CameraCalibration DefaultCalibration() { return {.native_width = 1440, .native_height = 1080, .camera_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 1.0}, .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB, .distortion_coefficients = {-0.09182103918709904, 0.4639907346830205, 0.002609878642637282, 0.0009819586010405485, -0.4751278850310457}, .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, .projection_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 0.0, 1.0, 0.0}}; }
-
-  static RuntimeParam DefaultRuntime() { return {}; }
-
   explicit HikCamera(
       LibXR::RamFS& ramfs,
       CameraCalibration calibration = DefaultCalibration(),
