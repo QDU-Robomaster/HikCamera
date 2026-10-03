@@ -375,7 +375,21 @@ class HikCamera : public CameraBase<FrameLayoutV>
    * @return 默认标定。
    *         Default calibration.
    */
-  static CameraCalibration DefaultCalibration() { return {.native_width = 1440, .native_height = 1080, .camera_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 1.0}, .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB, .distortion_coefficients = {-0.09182103918709904, 0.4639907346830205, 0.002609878642637282, 0.0009819586010405485, -0.4751278850310457}, .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, .projection_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 0.0, 1.0, 0.0}}; }
+  static CameraCalibration DefaultCalibration()
+  {
+    return {.native_width = 1440,
+            .native_height = 1080,
+            .camera_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0,
+                              2328.670107789996, 540.6187286922773, 0.0, 0.0, 1.0},
+            .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB,
+            .distortion_coefficients = {-0.09182103918709904, 0.4639907346830205,
+                                        0.002609878642637282, 0.0009819586010405485,
+                                        -0.4751278850310457},
+            .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0},
+            .projection_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 0.0,
+                                  2328.670107789996, 540.6187286922773, 0.0, 0.0, 0.0,
+                                  1.0, 0.0}};
+  }
 
   /**
    * @brief 返回默认的运行时参数。
@@ -399,10 +413,9 @@ class HikCamera : public CameraBase<FrameLayoutV>
    * @param runtime 运行时参数。
    *                Runtime parameters.
    */
-  explicit HikCamera(
-      LibXR::RamFS& ramfs,
-      CameraCalibration calibration = DefaultCalibration(),
-      RuntimeParam runtime = DefaultRuntime())
+  explicit HikCamera(LibXR::RamFS& ramfs,
+                     CameraCalibration calibration = DefaultCalibration(),
+                     RuntimeParam runtime = DefaultRuntime())
       : Base(ramfs, calibration, runtime.camera_name, runtime.image_topic_name,
              runtime.imu_topic_name),
         runtime_(runtime)
