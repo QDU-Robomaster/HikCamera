@@ -205,9 +205,9 @@ Configuration parameters:
 
 ## 8. 配置示例 / Configuration Example
 
-`xrobot instance add QDU-Robomaster/HikCamera` 写入的实例带有空的 `template_args`，帧布局与标定以 constexpr 定义，`ramfs` 填写为 BSP 中注册的 RamFS 名称。默认标定为 1440x1080、默认 WIDE 下采样为 2x2，因此示例使用 720x540 布局，`runtime` 以 YAML 映射按完整形式的构造函数参数名写出。`CameraFrameSync` 实例用 `camera: camera` 引用本实例，列在本实例之后。
+`xrobot instance add QDU-Robomaster/HikCamera --template-arg <FrameLayout>` 写入的实例，`template_args` 引用 YAML 中以 constexpr 定义的帧布局，`calibration` 与 `runtime` 为工具写入的 C++ 表达式 `DefaultCalibration()` 与 `DefaultRuntime()`，`ramfs` 填写为 BSP 中用 `XR_REGISTER`（硬件注册）注册的 RamFS 名称。默认标定为 1440x1080、默认 WIDE 下采样为 2x2，因此示例使用 720x540 布局。`runtime` 写成 YAML 映射时，键为所选构造函数的参数名（第 6 节表中的字段名，例如完整形式的 `camera_name` 与 `wide_trigger_period_us`），字符串写成带引号的 C++ 字符串字面量。`CameraFrameSync` 实例用 `camera: camera` 引用本实例，列在本实例之后。
 
-An instance written by `xrobot instance add QDU-Robomaster/HikCamera` has an empty `template_args`; the frame layout and the calibration are defined as constexprs and `ramfs` is set to a RamFS name registered by the BSP. The default calibration is 1440x1080 and the default WIDE decimation is 2x2, so the example uses a 720x540 layout, and `runtime` is written as a YAML mapping with the parameter names of the full constructor form. A `CameraFrameSync` instance refers to this instance with `camera: camera` and is listed after it.
+An instance written by `xrobot instance add QDU-Robomaster/HikCamera --template-arg <FrameLayout>`; `template_args` refers to the frame layout defined as a constexpr in the YAML, `calibration` and `runtime` are the C++ expressions `DefaultCalibration()` and `DefaultRuntime()` written by the tool, and `ramfs` is set to a RamFS name registered in the BSP with `XR_REGISTER` (Registration). The default calibration is 1440x1080 and the default WIDE decimation is 2x2, so the example uses a 720x540 layout. When `runtime` is written as a YAML mapping, the keys are the parameter names of the chosen constructor (the field names in the table of section 6, for example `camera_name` and `wide_trigger_period_us` of the full form), and strings are written as quoted C++ string literals. A `CameraFrameSync` instance refers to this instance with `camera: camera` and is listed after it.
 
 ```yaml
 constexpr_includes:
@@ -224,24 +224,7 @@ modules:
     args:
       - ramfs: ramfs
       - calibration: HikCamera<ProjectConstexpr::HikFrameLayout>::DefaultCalibration()
-      - runtime:
-          camera_name: "gimbal"
-          image_topic_name: "camera_image"
-          imu_topic_name: "camera_imu"
-          gain: 16.0F
-          exposure_time: 2000.0F
-          external_trigger: true
-          acquisition_frame_rate: 249.0F
-          grab_timeout_ms: 100
-          image_node_num: 3
-          rotate_180: false
-          wide_decimation_x: 2
-          wide_decimation_y: 2
-          wide_trigger_period_us: 10000
-          narrow_trigger_period_us: 5000
-          adc_bit_depth: std::nullopt
-          gamma_enabled: false
-          gamma: 1.0F
+      - runtime: HikCamera<ProjectConstexpr::HikFrameLayout>::DefaultRuntime()
 ```
 
 ## 9. 依赖与硬件 / Dependencies and Hardware
