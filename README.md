@@ -210,6 +210,7 @@ Configuration parameters:
 An instance written by `xrobot instance add QDU-Robomaster/HikCamera --template-arg <FrameLayout>`; `template_args` refers to the frame layout defined as a constexpr in the YAML, `calibration` and `runtime` are the C++ expressions `DefaultCalibration()` and `DefaultRuntime()` written by the tool, and `ramfs` is set to a RamFS name registered in the BSP with `XR_REGISTER` (Registration). The default calibration is 1440x1080 and the default WIDE decimation is 2x2, so the example uses a 720x540 layout. When `runtime` is written as a YAML mapping, the keys are the parameter names of the chosen constructor (the field names in the table of section 6, for example `camera_name` and `wide_trigger_period_us` of the full form), and strings are written as quoted C++ string literals. A `CameraFrameSync` instance refers to this instance with `camera: camera` and is listed after it.
 
 ```yaml
+constexpr_namespace: AutoAimRunConfig
 constexpr_includes:
   - CameraBase.hpp
 constexprs:
@@ -220,11 +221,11 @@ modules:
   - module: QDU-Robomaster/HikCamera
     id: camera
     template_args:
-      - ProjectConstexpr::HikFrameLayout
+      - AutoAimRunConfig::HikFrameLayout
     args:
       - ramfs: ramfs
-      - calibration: HikCamera<ProjectConstexpr::HikFrameLayout>::DefaultCalibration()
-      - runtime: HikCamera<ProjectConstexpr::HikFrameLayout>::DefaultRuntime()
+      - calibration: HikCamera<AutoAimRunConfig::HikFrameLayout>::DefaultCalibration()
+      - runtime: HikCamera<AutoAimRunConfig::HikFrameLayout>::DefaultRuntime()
 ```
 
 ## 9. 依赖与硬件 / Dependencies and Hardware
@@ -238,8 +239,6 @@ modules:
 
 硬件：Hikrobot USB 相机，外触发模式下 Line0 接触发信号。
 
-测试：在打开 `BUILD_TESTING` 的 BSP 构建中，模块加入 `hik_camera_profile_control_test`（切档重试与 SDK 停流状态）和 `hik_camera_runtime_param_test`（`RuntimeParam` 各构造形式与默认值，编译期检查），用 `ctest` 运行。
-
 Dependencies:
 
 - `QDU-Robomaster/CameraBase`: the camera base class and the shared image slots.
@@ -249,4 +248,8 @@ Dependencies:
 
 Hardware: a Hikrobot USB camera, with the trigger signal on Line0 in external trigger mode.
 
-Tests: in a BSP build with `BUILD_TESTING` on, the Module adds `hik_camera_profile_control_test` (profile switch retries and the SDK stream state) and `hik_camera_runtime_param_test` (the constructor forms and defaults of `RuntimeParam`, checked at compile time), run with `ctest`.
+## 10. 测试 / Tests
+
+在打开 `BUILD_TESTING` 的 BSP 构建中，模块加入 `hik_camera_profile_control_test`（切档重试与 SDK 停流状态）和 `hik_camera_runtime_param_test`（`RuntimeParam` 各构造形式与默认值，编译期检查），用 `ctest` 运行。
+
+In a BSP build with `BUILD_TESTING` on, the Module adds `hik_camera_profile_control_test` (profile switch retries and the SDK stream state) and `hik_camera_runtime_param_test` (the constructor forms and defaults of `RuntimeParam`, checked at compile time), run with `ctest`.
