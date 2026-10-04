@@ -2,45 +2,12 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: Hikrobot USB 相机采集模块，向 CameraBase 图像槽写入图像
-constructor_args:
-  - calibration:
-      native_width: 1440
-      native_height: 1080
-      camera_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 1.0]
-      distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
-      distortion_coefficients: [-0.091821039187099038, 0.46399073468302049, 0.0026098786426372819, 0.0009819586010405485, -0.47512788503104569]
-      rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-      projection_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 0.0, 1.0, 0.0]
-  - runtime:
-      camera_name: "camera"
-      image_topic_name: "camera_image"
-      imu_topic_name: "camera_imu"
-      gain: 16.0
-      exposure_time: 2000.0
-      external_trigger: true
-      acquisition_frame_rate: 249.0
-      grab_timeout_ms: 100
-      image_node_num: 3
-      rotate_180: false
-      wide_decimation_x: 2
-      wide_decimation_y: 2
-      wide_trigger_period_us: 10000
-      narrow_trigger_period_us: 5000
-      adc_bit_depth: std::nullopt
-      gamma_enabled: false
-      gamma: 1.0
-template_args:
-  - Layout:
-      width: 720
-      height: 540
-      step: 2160
-      encoding: CameraTypes::Encoding::BGR8
-required_hardware:
-  - Hikrobot USB camera
+module_description: Hikrobot USB 相机采集模块：读取 BGR8 图像并写入 CameraBase 图像槽 / Hikrobot USB camera capture Module that reads BGR8 images into the CameraBase image slots
 depends:
-  - qdu-future/CameraBase
-  - xrobot-org/DurationStatistics
+- id: QDU-Robomaster/CameraBase
+  ref: same-or-dev
+- id: xrobot-org/DurationStatistics
+  ref: same-or-dev
 === END MANIFEST === */
 // clang-format on
 
@@ -61,9 +28,9 @@ depends:
 #include "DurationStatistics.hpp"
 #include "HikCameraProfileControl.hpp"
 #include "MvCameraControl.h"
-#include "app_framework.hpp"
 #include "libxr.hpp"
 #include "logger.hpp"
+#include "ramfs.hpp"
 #include "thread.hpp"
 
 /**
@@ -75,38 +42,65 @@ depends:
  * @tparam FrameLayoutV 相机输出图像的固定存储容量和像素格式。
  */
 template <CameraTypes::FrameLayout FrameLayoutV>
-class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
+class HikCamera : public CameraBase<FrameLayoutV>
 {
  public:
-  using Self = HikCamera<FrameLayoutV>;                        ///< 当前模板实例类型。
-  using Base = CameraBase<FrameLayoutV>;                       ///< CameraBase 基类类型。
-  using ImageFrame = typename Base::ImageFrame;                ///< 图像槽载荷类型。
-  using CameraCalibration = typename Base::CameraCalibration;  ///< 原生相机标定。
-  using FrameGeometry = typename Base::FrameGeometry;          ///< 逐帧采样几何。
-  using ProfileId = typename Base::ProfileId;                  ///< 固定档位标识。
-  using CameraProfile = typename Base::CameraProfile;          ///< 固定档位描述。
-  using AppliedProfile = typename Base::AppliedProfile;        ///< 已应用档位快照。
+  /// 当前模板实例类型
+  /// Current template instantiation type
+  using Self = HikCamera<FrameLayoutV>;
+  /// CameraBase 基类类型
+  /// CameraBase base class type
+  using Base = CameraBase<FrameLayoutV>;
+  /// 图像槽载荷类型
+  /// Image slot payload type
+  using ImageFrame = typename Base::ImageFrame;
+  /// 原生相机标定
+  /// Native camera calibration
+  using CameraCalibration = typename Base::CameraCalibration;
+  /// 逐帧采样几何
+  /// Per-frame sampling geometry
+  using FrameGeometry = typename Base::FrameGeometry;
+  /// 固定档位标识
+  /// Fixed profile identifier
+  using ProfileId = typename Base::ProfileId;
+  /// 固定档位描述
+  /// Fixed profile descriptor
+  using CameraProfile = typename Base::CameraProfile;
+  /// 已应用档位快照
+  /// Applied profile snapshot
+  using AppliedProfile = typename Base::AppliedProfile;
 
   /// 编译期帧存储布局。
+  /// Compile-time frame storage layout.
   static inline constexpr auto frame_layout = Base::frame_layout;
   /// Hik SDK 当前取图路径固定输出 BGR 三通道。
+  /// The Hik SDK grab path always outputs three BGR channels.
   static constexpr int channel_count = 3;
   /// 每行字节数。
+  /// Bytes per row.
   static constexpr std::size_t frame_step = static_cast<std::size_t>(frame_layout.step);
   /// 一秒对应的微秒数。
+  /// Microseconds per second.
   static constexpr uint64_t microseconds_per_second = 1000000ULL;
-  /// 当前实机使用的增益上限。
+  /// 增益上限。
+  /// Gain limit.
   static constexpr float max_gain = 16.0F;
   /// 产品宽视场档位的默认触发周期。
+  /// Default trigger period of the product WIDE profile.
   static constexpr uint32_t default_wide_trigger_period_us = 10000U;
   /// 产品窄视场档位的默认触发周期。
+  /// Default trigger period of the product NARROW profile.
   static constexpr uint32_t default_narrow_trigger_period_us = 5000U;
   /// 产品宽视场档位的默认横向下采样倍率。
+  /// Default horizontal decimation factor of the product WIDE profile.
   static constexpr uint32_t default_wide_decimation_x = 2U;
   /// 产品宽视场档位的默认纵向下采样倍率。
+  /// Default vertical decimation factor of the product WIDE profile.
   static constexpr uint32_t default_wide_decimation_y = 2U;
 
-  /// 默认值的兼容名称；实际档位参数由 RuntimeParam 指定。
+  /// 档位参数的默认值；实际值由 RuntimeParam 指定。
+  /// Default values of the profile parameters; the actual values are given by
+  /// RuntimeParam.
   static constexpr uint32_t wide_trigger_period_us = default_wide_trigger_period_us;
   static constexpr uint32_t narrow_trigger_period_us = default_narrow_trigger_period_us;
   static constexpr uint32_t wide_decimation_x = default_wide_decimation_x;
@@ -124,40 +118,114 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   static_assert(Base::image_bytes % channel_count == 0,
                 "HikCamera expects complete BGR pixels");
 
-  /** @brief 传感器 ADC 位深；SDK 数值在驱动内部转换。 */
+  /**
+   * @brief 传感器 ADC 位深；SDK 数值在驱动内部转换。
+   *        Sensor ADC bit depth; the SDK values are converted inside the driver.
+   */
   enum class AdcBitDepth : uint32_t
   {
-    BIT_8 = 8,
-    BIT_10 = 10,
-    BIT_11 = 11,
-    BIT_12 = 12,
+    BIT_8 = 8,    ///< 8 位 8 bits
+    BIT_10 = 10,  ///< 10 位 10 bits
+    BIT_11 = 11,  ///< 11 位 11 bits
+    BIT_12 = 12,  ///< 12 位 12 bits
   };
 
-  /** @brief xrobot YAML 传入的运行时参数。 */
+  /**
+   * @brief 运行时参数，字段值来自配置（YAML）。
+   *        Runtime parameters; the field values come from the configuration (YAML).
+   */
   struct RuntimeParam
   {
-    std::string_view camera_name = "camera";             ///< CameraBase 相机名。
-    std::string_view image_topic_name = "camera_image";  ///< 图像共享话题名。
-    std::string_view imu_topic_name = "camera_imu";      ///< 同步后 IMU 话题名。
-    float gain = 16.0F;                                  ///< 相机增益。
-    float exposure_time = 2000.0F;                       ///< 曝光时间，单位微秒。
-    bool external_trigger = true;           ///< true 时使用 Line0 上升沿外触发。
-    float acquisition_frame_rate = 249.0F;  ///< 非外触发模式下的自由运行帧率。
-    uint32_t grab_timeout_ms = 100;         ///< SDK 等待一帧图像的超时时间。
-    uint32_t image_node_num = 3;            ///< SDK 内部取流缓存节点数。
-    bool rotate_180 = false;  ///< true 时使用相机 ReverseX/Y 做 180 度旋转。
-    uint32_t wide_decimation_x = default_wide_decimation_x;  ///< WIDE 档横向下采样倍率。
-    uint32_t wide_decimation_y = default_wide_decimation_y;  ///< WIDE 档纵向下采样倍率。
-    uint32_t wide_trigger_period_us =
-        default_wide_trigger_period_us;  ///< WIDE 档外触发周期，单位 us。
-    uint32_t narrow_trigger_period_us =
-        default_narrow_trigger_period_us;        ///< NARROW 档外触发周期，单位 us。
-    std::optional<AdcBitDepth> adc_bit_depth{};  ///< 未指定时保留设备 ADC 位深。
-    bool gamma_enabled = false;  ///< true 时设置 User Gamma，false 时不改 Gamma 节点。
-    float gamma = 1.0F;          ///< User Gamma 请求值，须有限且在设备支持范围内。
+    /// CameraBase 相机名
+    /// CameraBase camera name
+    std::string_view camera_name = "camera";
+    /// 图像 Topic 名
+    /// Image Topic name
+    std::string_view image_topic_name = "camera_image";
+    /// 同步后的 IMU Topic 名
+    /// Synchronized IMU Topic name
+    std::string_view imu_topic_name = "camera_imu";
+    /// 相机增益
+    /// Camera gain
+    float gain = 16.0F;
+    /// 曝光时间，单位微秒
+    /// Exposure time in us
+    float exposure_time = 2000.0F;
+    /// true 时使用 Line0 上升沿外触发
+    /// Line0 rising-edge external trigger when true
+    bool external_trigger = true;
+    /// 非外触发模式下的自由运行帧率
+    /// Free-running frame rate without external trigger
+    float acquisition_frame_rate = 249.0F;
+    /// SDK 等待一帧图像的超时时间
+    /// Timeout in ms for the SDK to wait for one image
+    uint32_t grab_timeout_ms = 100;
+    /// SDK 内部取流缓存节点数
+    /// Number of SDK internal stream buffer nodes
+    uint32_t image_node_num = 3;
+    /// true 时使用相机 ReverseX/Y 做 180 度旋转
+    /// Rotate by 180 degrees with the camera ReverseX/Y when true
+    bool rotate_180 = false;
+    /// WIDE 档横向下采样倍率
+    /// Horizontal decimation factor of the WIDE profile
+    uint32_t wide_decimation_x = default_wide_decimation_x;
+    /// WIDE 档纵向下采样倍率
+    /// Vertical decimation factor of the WIDE profile
+    uint32_t wide_decimation_y = default_wide_decimation_y;
+    /// WIDE 档外触发周期，单位 us
+    /// External trigger period of the WIDE profile in us
+    uint32_t wide_trigger_period_us = default_wide_trigger_period_us;
+    /// NARROW 档外触发周期，单位 us
+    /// External trigger period of the NARROW profile in us
+    uint32_t narrow_trigger_period_us = default_narrow_trigger_period_us;
+    /// 未指定时保留设备 ADC 位深
+    /// Device ADC bit depth kept when unspecified
+    std::optional<AdcBitDepth> adc_bit_depth{};
+    /// true 时设置 User Gamma，false 时不改 Gamma 节点
+    /// User Gamma set when true, Gamma kept when false
+    bool gamma_enabled = false;
+    /// User Gamma 请求值，须有限且在设备支持范围内
+    /// Requested User Gamma, finite and within the device range
+    float gamma = 1.0F;
 
+    /**
+     * @brief 使用全部字段的默认值构造。
+     *        Construct with the default values of all fields.
+     */
     RuntimeParam() = default;
 
+    /**
+     * @brief 基本形式：不含 WIDE / NARROW 档位字段，这些字段取默认值。
+     *        Basic form without the WIDE / NARROW profile fields, which take their
+     *        default values.
+     *
+     * @param camera_name CameraBase 相机名。
+     *                    CameraBase camera name.
+     * @param image_topic_name 图像 Topic 名。
+     *                         Image Topic name.
+     * @param imu_topic_name 同步后的 IMU Topic 名。
+     *                       Synchronized IMU Topic name.
+     * @param gain 相机增益。
+     *             Camera gain.
+     * @param exposure_time 曝光时间，单位 us。
+     *                      Exposure time in us.
+     * @param external_trigger true 时使用 Line0 上升沿外触发。
+     *                         Line0 rising-edge external trigger when true.
+     * @param acquisition_frame_rate 非外触发模式下的自由运行帧率。
+     *                               Free-running frame rate without external trigger.
+     * @param grab_timeout_ms SDK 等待一帧图像的超时时间，单位 ms。
+     *                        Timeout in ms for the SDK to wait for one image.
+     * @param image_node_num SDK 内部取流缓存节点数。
+     *                       Number of SDK internal stream buffer nodes.
+     * @param rotate_180 true 时使用相机 ReverseX/Y 做 180 度旋转。
+     *                   Rotate by 180 degrees with the camera ReverseX/Y when true.
+     * @param adc_bit_depth ADC 位深，未指定时保留设备值。
+     *                      ADC bit depth; the device value is kept when unspecified.
+     * @param gamma_enabled true 时设置 User Gamma。
+     *                      Set User Gamma when true.
+     * @param gamma User Gamma 请求值。
+     *              Requested User Gamma.
+     */
     constexpr RuntimeParam(std::string_view camera_name,
                            std::string_view image_topic_name,
                            std::string_view imu_topic_name, float gain,
@@ -182,7 +250,43 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     {
     }
 
-    /** 兼容旧 YAML 中位于 rotate_180 之前的两个下采样字段。 */
+    /**
+     * @brief 在 `rotate_180` 之前带 `decimation_horizontal`、`decimation_vertical`
+     * 的形式， 二者设置 WIDE 档的下采样倍率。 Form with `decimation_horizontal` and
+     * `decimation_vertical` before `rotate_180`, which set the WIDE profile decimation
+     * factors.
+     *
+     * @param camera_name CameraBase 相机名。
+     *                    CameraBase camera name.
+     * @param image_topic_name 图像 Topic 名。
+     *                         Image Topic name.
+     * @param imu_topic_name 同步后的 IMU Topic 名。
+     *                       Synchronized IMU Topic name.
+     * @param gain 相机增益。
+     *             Camera gain.
+     * @param exposure_time 曝光时间，单位 us。
+     *                      Exposure time in us.
+     * @param external_trigger true 时使用 Line0 上升沿外触发。
+     *                         Line0 rising-edge external trigger when true.
+     * @param acquisition_frame_rate 非外触发模式下的自由运行帧率。
+     *                               Free-running frame rate without external trigger.
+     * @param grab_timeout_ms SDK 等待一帧图像的超时时间，单位 ms。
+     *                        Timeout in ms for the SDK to wait for one image.
+     * @param image_node_num SDK 内部取流缓存节点数。
+     *                       Number of SDK internal stream buffer nodes.
+     * @param decimation_horizontal WIDE 档横向下采样倍率。
+     *                              Horizontal decimation factor of the WIDE profile.
+     * @param decimation_vertical WIDE 档纵向下采样倍率。
+     *                            Vertical decimation factor of the WIDE profile.
+     * @param rotate_180 true 时使用相机 ReverseX/Y 做 180 度旋转。
+     *                   Rotate by 180 degrees with the camera ReverseX/Y when true.
+     * @param adc_bit_depth ADC 位深，未指定时保留设备值。
+     *                      ADC bit depth; the device value is kept when unspecified.
+     * @param gamma_enabled true 时设置 User Gamma。
+     *                      Set User Gamma when true.
+     * @param gamma User Gamma 请求值。
+     *              Requested User Gamma.
+     */
     constexpr RuntimeParam(std::string_view camera_name,
                            std::string_view image_topic_name,
                            std::string_view imu_topic_name, float gain,
@@ -200,6 +304,47 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       wide_decimation_y = decimation_vertical;
     }
 
+    /**
+     * @brief 完整形式：在 `rotate_180` 之后带 WIDE 档下采样倍率和两档的外触发周期。
+     *        Full form with the WIDE decimation factors and the external trigger
+     *        periods of both profiles after `rotate_180`.
+     *
+     * @param camera_name CameraBase 相机名。
+     *                    CameraBase camera name.
+     * @param image_topic_name 图像 Topic 名。
+     *                         Image Topic name.
+     * @param imu_topic_name 同步后的 IMU Topic 名。
+     *                       Synchronized IMU Topic name.
+     * @param gain 相机增益。
+     *             Camera gain.
+     * @param exposure_time 曝光时间，单位 us。
+     *                      Exposure time in us.
+     * @param external_trigger true 时使用 Line0 上升沿外触发。
+     *                         Line0 rising-edge external trigger when true.
+     * @param acquisition_frame_rate 非外触发模式下的自由运行帧率。
+     *                               Free-running frame rate without external trigger.
+     * @param grab_timeout_ms SDK 等待一帧图像的超时时间，单位 ms。
+     *                        Timeout in ms for the SDK to wait for one image.
+     * @param image_node_num SDK 内部取流缓存节点数。
+     *                       Number of SDK internal stream buffer nodes.
+     * @param rotate_180 true 时使用相机 ReverseX/Y 做 180 度旋转。
+     *                   Rotate by 180 degrees with the camera ReverseX/Y when true.
+     * @param wide_decimation_x WIDE 档横向下采样倍率。
+     *                          Horizontal decimation factor of the WIDE profile.
+     * @param wide_decimation_y WIDE 档纵向下采样倍率。
+     *                          Vertical decimation factor of the WIDE profile.
+     * @param wide_trigger_period_us WIDE 档外触发周期，单位 us。
+     *                               External trigger period of the WIDE profile in us.
+     * @param narrow_trigger_period_us NARROW 档外触发周期，单位 us。
+     *                                 External trigger period of the NARROW profile in
+     *                                 us.
+     * @param adc_bit_depth ADC 位深，未指定时保留设备值。
+     *                      ADC bit depth; the device value is kept when unspecified.
+     * @param gamma_enabled true 时设置 User Gamma。
+     *                      Set User Gamma when true.
+     * @param gamma User Gamma 请求值。
+     *              Requested User Gamma.
+     */
     constexpr RuntimeParam(std::string_view camera_name,
                            std::string_view image_topic_name,
                            std::string_view imu_topic_name, float gain,
@@ -223,18 +368,55 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   };
 
   /**
-   * @brief 打开相机、配置参数并启动采集线程。
+   * @brief 返回默认的原生标定：1440x1080，`PLUMB_BOB` 五项畸变的实机标定。
+   *        Return the default native calibration: a calibration measured on the real
+   *        camera at 1440x1080 with five `PLUMB_BOB` distortion terms.
    *
-   * @param hw 硬件容器，传给 `CameraBase` 注册 RamFS 命令。
-   * @param app 应用管理器。
-   * @param calibration 原生传感器坐标系下的相机标定。
-   * @param runtime 运行时相机参数。
-   *
-   * 配置或开始取流失败时会抛出 `std::runtime_error`。
+   * @return 默认标定。
+   *         Default calibration.
    */
-  explicit HikCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                     CameraCalibration calibration, RuntimeParam runtime)
-      : Base(hw, calibration, runtime.camera_name, runtime.image_topic_name,
+  static CameraCalibration DefaultCalibration()
+  {
+    return {.native_width = 1440,
+            .native_height = 1080,
+            .camera_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0,
+                              2328.670107789996, 540.6187286922773, 0.0, 0.0, 1.0},
+            .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB,
+            .distortion_coefficients = {-0.09182103918709904, 0.4639907346830205,
+                                        0.002609878642637282, 0.0009819586010405485,
+                                        -0.4751278850310457},
+            .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0},
+            .projection_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 0.0,
+                                  2328.670107789996, 540.6187286922773, 0.0, 0.0, 0.0,
+                                  1.0, 0.0}};
+  }
+
+  /**
+   * @brief 返回默认的运行时参数。
+   *        Return the default runtime parameters.
+   *
+   * @return 默认运行时参数。
+   *         Default runtime parameters.
+   */
+  static RuntimeParam DefaultRuntime() { return {}; }
+
+  /**
+   * @brief 打开相机、配置参数并启动采集线程；配置或开始取流失败时抛出
+   *        `std::runtime_error`。
+   *        Open the camera, configure the parameters and start the capture thread;
+   *        throw `std::runtime_error` when configuration or starting the stream fails.
+   *
+   * @param ramfs 注册相机命令文件的 RamFS。
+   *              RamFS that registers the camera command file.
+   * @param calibration 原生传感器坐标系下的相机标定。
+   *                    Camera calibration in the native sensor coordinates.
+   * @param runtime 运行时参数。
+   *                Runtime parameters.
+   */
+  explicit HikCamera(LibXR::RamFS& ramfs,
+                     CameraCalibration calibration = DefaultCalibration(),
+                     RuntimeParam runtime = DefaultRuntime())
+      : Base(ramfs, calibration, runtime.camera_name, runtime.image_topic_name,
              runtime.imu_topic_name),
         runtime_(runtime)
   {
@@ -247,7 +429,6 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
       CaptureStop();
       throw std::runtime_error("HikCamera: failed to start camera");
     }
-    app.Register(*this);
   }
 
   /**
@@ -264,7 +445,12 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     CaptureStop();
   }
 
-  void OnMonitor() override
+  /**
+   * @brief 打印已提交帧数、失败帧数和单帧采集耗时统计。
+   *        Print the committed frame count, the failed frame count and the per-frame
+   *        capture duration statistics.
+   */
+  void OnMonitor()
   {
     const auto frame_capture = frame_capture_duration_.GetSummary();
     XR_LOG_INFO("HikCamera monitor: frames=%u failures=%u",
@@ -278,12 +464,26 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
         static_cast<unsigned long long>(frame_capture.maximum_us));
   }
 
+  /**
+   * @brief 设置曝光时间并下发到相机。
+   *        Set the exposure time and send it to the camera.
+   *
+   * @param exposure 曝光时间，单位 us。
+   *                 Exposure time in us.
+   */
   void SetExposure(double exposure) override
   {
     runtime_.exposure_time = static_cast<float>(exposure);
     UpdateParameters();
   }
 
+  /**
+   * @brief 设置增益并下发到相机，超过 16 时截断为 16。
+   *        Set the gain and send it to the camera; a value above 16 is clamped to 16.
+   *
+   * @param gain 增益。
+   *             Gain.
+   */
   void SetGain(double gain) override
   {
     runtime_.gain = ClampGain(static_cast<float>(gain));
@@ -292,6 +492,10 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 返回固定的 WIDE/NARROW 档位表。
+   *        Return the fixed WIDE/NARROW profile table.
+   *
+   * @return 档位表。
+   *         Profile table.
    */
   [[nodiscard]] std::span<const CameraProfile> Profiles() const noexcept override
   {
@@ -300,9 +504,25 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 停止 SDK 取流并阻塞切换到指定档位。
+   *        Stop the SDK stream and switch to the given profile, blocking until done.
    *
-   * 调用方必须先停止外部触发。同一目标最多尝试四次；每次确认 SDK 停流后
-   * 再写入配置并读回校验。超限时记录错误、保持采集线程停止且不修改 applied。
+   * 调用方先停止外部触发。同一目标最多尝试四次；每次确认 SDK 停流后再写入配置并读回
+   * 校验。超过次数时记录错误，采集线程保持停止，`applied` 不变。
+   *
+   * The caller stops the external trigger first. The same target is tried at most four
+   * times; each attempt confirms the SDK stream is stopped, then writes the
+   * configuration and verifies it by reading back. When the attempts are exhausted the
+   * error is logged, the capture thread stays stopped and `applied` is unchanged.
+   *
+   * @param id 目标档位。
+   *           Target profile.
+   * @param applied 输出：切换成功后实际生效的档位与几何。
+   *                Output: the profile and geometry in effect after a successful switch.
+   * @return `OK` 表示成功；`NOT_SUPPORT` 表示档位不存在；`STATE_ERR` 表示请求当前档位但
+   *         采集已停止；`FAILED` 表示超过尝试次数。
+   *         `OK` on success; `NOT_SUPPORT` when the profile does not exist; `STATE_ERR`
+   *         when the current profile is requested while capture is stopped; `FAILED` when
+   *         the attempts are exhausted.
    */
   LibXR::ErrorCode SwitchProfile(ProfileId id, AppliedProfile& applied) override
   {
@@ -395,7 +615,8 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
  private:
   /**
-   * @brief 把增益限制在当前配置允许的范围内。
+   * @brief 把增益限制在上限以内。
+   *        Clamp the gain to the limit.
    */
   static float ClampGain(float gain)
   {
@@ -409,7 +630,9 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
   }
 
   /**
-   * @brief 检查档位下采样和触发周期是否可用于相机配置。
+   * @brief 检查档位下采样倍率和触发周期是否大于零。
+   *        Check that the profile decimation factors and trigger periods are greater
+   *        than zero.
    */
   bool ValidateRuntimeProfileConfig() const
   {
@@ -477,6 +700,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 写入 Hik SDK float 节点。
+   *        Write a Hik SDK float node.
    */
   bool SetFloatValue(const char* name, double value)
   {
@@ -492,6 +716,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 写入 Hik SDK enum 节点。
+   *        Write a Hik SDK enum node.
    */
   bool SetEnumValue(const char* name, unsigned int value)
   {
@@ -506,6 +731,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 用字符串写入 Hik SDK enum 节点。
+   *        Write a Hik SDK enum node by string.
    */
   bool SetEnumValueByString(const char* name, const char* value)
   {
@@ -521,6 +747,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 读取 Hik SDK enum 节点。
+   *        Read a Hik SDK enum node.
    */
   bool GetEnumValue(const char* name, MVCC_ENUMVALUE& value, bool required = true)
   {
@@ -538,6 +765,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 读取 Hik SDK bool 节点。
+   *        Read a Hik SDK bool node.
    */
   bool GetBoolValue(const char* name, bool& value)
   {
@@ -552,6 +780,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 写入 Hik SDK bool 节点。
+   *        Write a Hik SDK bool node.
    */
   bool SetBoolValue(const char* name, bool value)
   {
@@ -567,6 +796,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 读取 Hik SDK integer 节点。
+   *        Read a Hik SDK integer node.
    */
   bool GetIntValue(const char* name, MVCC_INTVALUE_EX& value)
   {
@@ -581,6 +811,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 写入 Hik SDK integer 节点。
+   *        Write a Hik SDK integer node.
    */
   bool SetIntValue(const char* name, int64_t value)
   {
@@ -622,8 +853,11 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 配置相机下采样倍率。
+   *        Configure the camera decimation factors.
    *
-   * `1x1` 表示不下采样。请求其它倍率时，相机必须提供对应 SDK 节点。
+   * `1x1` 表示不下采样；请求其它倍率时，相机提供对应的 SDK 节点。
+   * `1x1` means no decimation; for any other factor the camera provides the matching SDK
+   * nodes.
    */
   bool ConfigureDecimation(uint32_t horizontal, uint32_t vertical)
   {
@@ -693,8 +927,12 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 按固定档位配置 `FrameLayoutV` 输出尺寸、ROI 和下采样。
+   *        Configure the `FrameLayoutV` output size, ROI and decimation for a fixed
+   *        profile.
    *
-   * 配置前会保存启动时的宽高、偏移和下采样设置，关闭相机时恢复。
+   * 配置前保存启动时的宽高、偏移和下采样设置，关闭相机时恢复。
+   * The width, offset and decimation settings from startup are saved before
+   * configuration and restored when the camera is closed.
    */
   bool ConfigureImageGeometry(ProfileId profile)
   {
@@ -867,6 +1105,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 恢复启动前保存的图像尺寸、偏移和下采样设置。
+   *        Restore the image size, offset and decimation settings saved before startup.
    */
   void RestoreImageGeometry()
   {
@@ -892,8 +1131,11 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 配置 180 度图像旋转。
+   *        Configure the 180-degree image rotation.
    *
-   * 旋转通过相机 `ReverseX` 和 `ReverseY` 节点完成。请求旋转但节点不可用时启动失败。
+   * 旋转通过相机 `ReverseX` 和 `ReverseY` 节点完成；请求旋转而节点不可用时启动失败。
+   * The rotation uses the camera `ReverseX` and `ReverseY` nodes; startup fails when
+   * rotation is requested and a node is unavailable.
    */
   bool ConfigureRotation()
   {
@@ -945,6 +1187,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 返回当前旋转方式名称，用于启动日志。
+   *        Return the name of the current rotation mode for the startup log.
    */
   const char* RotationModeName() const
   {
@@ -969,6 +1212,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 恢复启动前保存的 `ReverseX` 和 `ReverseY` 设置。
+   *        Restore the `ReverseX` and `ReverseY` settings saved before startup.
    */
   void RestoreDeviceRotation()
   {
@@ -983,7 +1227,11 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     reverse_state_saved_ = false;
   }
 
-  /** @brief 显式设置 ADC 位深，保存原值并读回确认。 */
+  /**
+   * @brief 显式设置 ADC 位深，保存原值并读回确认。
+   *        Set the ADC bit depth explicitly, saving the original value and confirming
+   *        by reading back.
+   */
   bool ConfigureAdcBitDepth()
   {
     if (!runtime_.adc_bit_depth)
@@ -1030,7 +1278,10 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     return true;
   }
 
-  /** @brief 恢复已保存的 ADC 设置，失败时保留错误日志。 */
+  /**
+   * @brief 恢复已保存的 ADC 设置，失败时记录错误日志。
+   *        Restore the saved ADC setting and log an error on failure.
+   */
   void RestoreAdcBitDepth()
   {
     if (old_adc_bit_depth_)
@@ -1043,7 +1294,11 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     }
   }
 
-  /** @brief 配置 User Gamma；任何新值写入前都必须保存原值。 */
+  /**
+   * @brief 配置 User Gamma；写入新值之前先保存原值。
+   *        Configure User Gamma; the original value is saved before a new value is
+   *        written.
+   */
   bool ConfigureGamma()
   {
     if (!runtime_.gamma_enabled)
@@ -1095,7 +1350,11 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     return true;
   }
 
-  /** @brief 先恢复 User Gamma 值，再恢复原选择器；两项独立尝试。 */
+  /**
+   * @brief 先恢复 User Gamma 值，再恢复原选择器，两项各自尝试。
+   *        Restore the User Gamma value first and then the original selector, each
+   *        attempted separately.
+   */
   void RestoreGamma()
   {
     if (old_gamma_value_)
@@ -1118,7 +1377,11 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     }
   }
 
-  /** @brief 自由运行时开启已有帧率控制，保存原开关和帧率。 */
+  /**
+   * @brief 自由运行时开启已有的帧率控制，保存原开关和帧率。
+   *        Enable the existing frame rate control for free-running mode, saving the
+   *        original switch and frame rate.
+   */
   bool ConfigureFrameRate()
   {
     MVCC_FLOATVALUE original{};
@@ -1145,7 +1408,11 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     return true;
   }
 
-  /** @brief 恢复帧率后再恢复使能开关，避免关闭后帧率节点不可写。 */
+  /**
+   * @brief 先恢复帧率再恢复使能开关，使帧率节点在恢复时可写。
+   *        Restore the frame rate first and then the enable switch, so that the frame
+   *        rate node is writable during restoration.
+   */
   void RestoreFrameRate()
   {
     if (!frame_rate_state_saved_)
@@ -1163,7 +1430,11 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     frame_rate_state_saved_ = false;
   }
 
-  /** @brief 关闭自动曝光；仅明确不支持该功能时跳过。 */
+  /**
+   * @brief 关闭自动曝光；仅当 SDK 明确返回不支持时跳过。
+   *        Turn off auto exposure; skipped only when the SDK explicitly reports it as
+   *        unsupported.
+   */
   bool DisableAutoExposure()
   {
     const auto ret =
@@ -1181,7 +1452,11 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     return true;
   }
 
-  /** @brief 枚举 USB 相机、打开设备并配置采集参数。 */
+  /**
+   * @brief 枚举 USB 相机、打开设备并配置采集参数。
+   *        Enumerate the USB cameras, open the device and configure the capture
+   *        parameters.
+   */
   bool CaptureStart()
   {
     MV_CC_DEVICE_INFO_LIST device_list{};
@@ -1262,6 +1537,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 开始 Hik SDK 取流。
+   *        Start the Hik SDK stream.
    */
   bool StartGrabbing()
   {
@@ -1275,7 +1551,11 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
     return true;
   }
 
-  /** Stop the SDK only when a successful start still needs a matching stop. */
+  /**
+   * @brief 仅在成功启动的取流仍需对应停止时停止 SDK 取流。
+   *        Stop the SDK stream only when a successfully started stream still needs a
+   *        matching stop.
+   */
   bool StopGrabbing()
   {
     return sdk_stream_.StopIfActive(
@@ -1293,6 +1573,8 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 启动采集线程；创建失败时请求 SDK 停流，后续重试再次确认停流状态。
+   *        Start the capture thread; when creation fails, request the SDK to stop the
+   *        stream, and later retries confirm the stream state again.
    */
   bool StartCaptureThread()
   {
@@ -1314,6 +1596,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 停止取流、恢复相机设置并销毁 SDK handle。
+   *        Stop the stream, restore the camera settings and destroy the SDK handle.
    */
   void CaptureStop()
   {
@@ -1334,6 +1617,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 下发当前曝光和增益设置。
+   *        Send the current exposure and gain settings.
    */
   void UpdateParameters()
   {
@@ -1347,8 +1631,10 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 读取设备时间戳频率。
+   *        Read the device timestamp frequency.
    *
    * 读取失败时按微秒 tick 处理，并打印警告。
+   * When reading fails, one tick per microsecond is assumed and a warning is printed.
    */
   void ProbeDeviceTimestampFrequency()
   {
@@ -1371,8 +1657,10 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 从 SDK 帧信息计算图像时间戳，单位微秒。
+   *        Compute the image timestamp in us from the SDK frame information.
    *
-   * 没有设备时间戳的帧会被拒绝。
+   * 没有设备时间戳的帧被拒绝。
+   * A frame without a device timestamp is rejected.
    */
   [[nodiscard]] bool ResolveImageTimestampUs(const MV_FRAME_OUT_INFO_EX& frame_info,
                                              uint64_t& timestamp_us)
@@ -1394,6 +1682,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 合并 Hik SDK 提供的高低 32 位时间戳。
+   *        Combine the high and low 32-bit timestamps provided by the Hik SDK.
    */
   static uint64_t CombineU32(uint32_t high, uint32_t low)
   {
@@ -1402,6 +1691,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 把设备 tick 换算成微秒。
+   *        Convert device ticks to microseconds.
    */
   uint64_t DeviceTicksToUs(uint64_t dev_ts) const
   {
@@ -1419,6 +1709,7 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 打印首帧时间戳和 SDK 帧号信息。
+   *        Print the first frame timestamps and the SDK frame number information.
    */
   void LogFirstCommittedFrame(const MV_FRAME_OUT_INFO_EX& frame_info,
                               uint64_t timestamp_us)
@@ -1436,6 +1727,8 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief 采集循环：取图、检查尺寸、写时间戳并提交图像。
+   *        Capture loop: grab an image, check the size, write the timestamp and commit
+   *        the image.
    */
   void CaptureLoop()
   {
@@ -1496,43 +1789,112 @@ class HikCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
 
   /**
    * @brief `std::thread` 入口。
+   *        Entry point of the `std::thread`.
    */
   static void CaptureThreadMain(Self* self) { self->CaptureLoop(); }
 
  private:
-  RuntimeParam runtime_{};                            ///< 当前运行参数快照。
-  std::optional<unsigned int> old_adc_bit_depth_{};   ///< 原 ADC 值及待恢复状态。
-  std::optional<unsigned int> old_gamma_selector_{};  ///< 改动前的 Gamma 选择器。
-  std::optional<float> old_gamma_value_{};        ///< 写入新 User Gamma 前保存的原值。
-  bool frame_rate_state_saved_{false};            ///< 自由运行帧率及开关需要恢复。
-  bool old_frame_rate_enabled_{false};            ///< 原帧率控制开关。
-  float old_frame_rate_{};                        ///< 原自由运行帧率。
-  HikCameraDetail::SdkStreamState sdk_stream_{};  ///< SDK 已启动但尚未成功停止。
-  void* camera_handle_{nullptr};                  ///< Hik SDK 设备 handle。
-  std::atomic<bool> camera_state_{false};         ///< 采集线程运行标志。
-  std::thread capture_thread_{};                  ///< 采集线程。
-  bool capture_thread_created_{false};            ///< 线程是否已创建。
-  bool device_rotate_180_{false};                 ///< 当前是否由相机完成 180 度旋转。
-  bool reverse_state_saved_{false};            ///< 是否保存过 ReverseX / ReverseY 原值。
-  bool geometry_state_saved_{false};           ///< 是否保存过宽高和偏移原值。
-  bool decimation_state_saved_{false};         ///< 是否保存过下采样原值。
-  bool old_reverse_x_{false};                  ///< 启动前的 ReverseX。
-  bool old_reverse_y_{false};                  ///< 启动前的 ReverseY。
-  uint32_t old_decimation_horizontal_{1};      ///< 启动前的横向下采样。
-  uint32_t old_decimation_vertical_{1};        ///< 启动前的纵向下采样。
-  uint32_t applied_decimation_horizontal_{1};  ///< SDK 实际应用的横向下采样。
-  uint32_t applied_decimation_vertical_{1};    ///< SDK 实际应用的纵向下采样。
-  int64_t old_width_{0};                       ///< 启动前的宽度。
-  int64_t old_height_{0};                      ///< 启动前的高度。
-  int64_t old_offset_x_{0};                    ///< 启动前的 X 偏移。
-  int64_t old_offset_y_{0};                    ///< 启动前的 Y 偏移。
-  MVCC_INTVALUE_EX full_width_range_{};        ///< 相机支持的宽度范围。
-  MVCC_INTVALUE_EX full_height_range_{};       ///< 相机支持的高度范围。
-  FrameGeometry frame_geometry_{};             ///< 每帧按值发布的固定采样几何。
-  std::array<CameraProfile, 2U> profiles_{};   ///< 生命周期内稳定的 WIDE/NARROW 档位。
-  ProfileId active_profile_{ProfileId::WIDE};  ///< 当前成功生效的档位。
-  uint64_t device_timestamp_frequency_hz_{microseconds_per_second};  ///< 设备时间戳频率。
+  /// 当前运行参数快照
+  /// Snapshot of the runtime parameters
+  RuntimeParam runtime_{};
+  /// 原 ADC 值及待恢复状态
+  /// Original ADC value awaiting restoration
+  std::optional<unsigned int> old_adc_bit_depth_{};
+  /// 改动前的 Gamma 选择器
+  /// Gamma selector before the change
+  std::optional<unsigned int> old_gamma_selector_{};
+  /// 写入新 User Gamma 前保存的原值
+  /// Original User Gamma saved before writing the new value
+  std::optional<float> old_gamma_value_{};
+  /// 自由运行帧率及开关需要恢复
+  /// Free-running frame rate and switch need restoration
+  bool frame_rate_state_saved_{false};
+  /// 原帧率控制开关
+  /// Original frame rate control switch
+  bool old_frame_rate_enabled_{false};
+  /// 原自由运行帧率
+  /// Original free-running frame rate
+  float old_frame_rate_{};
+  /// SDK 已启动但尚未成功停止
+  /// SDK started and not yet stopped successfully
+  HikCameraDetail::SdkStreamState sdk_stream_{};
+  /// Hik SDK 设备 handle
+  /// Hik SDK device handle
+  void* camera_handle_{nullptr};
+  /// 采集线程运行标志
+  /// Capture thread running flag
+  std::atomic<bool> camera_state_{false};
+  /// 采集线程
+  /// Capture thread
+  std::thread capture_thread_{};
+  /// 线程是否已创建
+  /// Whether the thread has been created
+  bool capture_thread_created_{false};
+  /// 当前是否由相机完成 180 度旋转
+  /// Whether the camera performs the 180-degree rotation
+  bool device_rotate_180_{false};
+  /// 是否保存过 ReverseX / ReverseY 原值
+  /// Whether the original ReverseX / ReverseY were saved
+  bool reverse_state_saved_{false};
+  /// 是否保存过宽高和偏移原值
+  /// Whether the original width, height and offsets were saved
+  bool geometry_state_saved_{false};
+  /// 是否保存过下采样原值
+  /// Whether the original decimation was saved
+  bool decimation_state_saved_{false};
+  /// 启动前的 ReverseX
+  /// ReverseX before startup
+  bool old_reverse_x_{false};
+  /// 启动前的 ReverseY
+  /// ReverseY before startup
+  bool old_reverse_y_{false};
+  /// 启动前的横向下采样
+  /// Horizontal decimation before startup
+  uint32_t old_decimation_horizontal_{1};
+  /// 启动前的纵向下采样
+  /// Vertical decimation before startup
+  uint32_t old_decimation_vertical_{1};
+  /// SDK 实际应用的横向下采样
+  /// Horizontal decimation applied by the SDK
+  uint32_t applied_decimation_horizontal_{1};
+  /// SDK 实际应用的纵向下采样
+  /// Vertical decimation applied by the SDK
+  uint32_t applied_decimation_vertical_{1};
+  /// 启动前的宽度
+  /// Width before startup
+  int64_t old_width_{0};
+  /// 启动前的高度
+  /// Height before startup
+  int64_t old_height_{0};
+  /// 启动前的 X 偏移
+  /// X offset before startup
+  int64_t old_offset_x_{0};
+  /// 启动前的 Y 偏移
+  /// Y offset before startup
+  int64_t old_offset_y_{0};
+  /// 相机支持的宽度范围
+  /// Width range supported by the camera
+  MVCC_INTVALUE_EX full_width_range_{};
+  /// 相机支持的高度范围
+  /// Height range supported by the camera
+  MVCC_INTVALUE_EX full_height_range_{};
+  /// 每帧按值发布的固定采样几何
+  /// Fixed sampling geometry published by value with every frame
+  FrameGeometry frame_geometry_{};
+  /// 生命周期内稳定的 WIDE/NARROW 档位
+  /// WIDE/NARROW profiles that stay stable over the lifetime
+  std::array<CameraProfile, 2U> profiles_{};
+  /// 当前成功生效的档位
+  /// Profile currently in effect
+  ProfileId active_profile_{ProfileId::WIDE};
+  /// 设备时间戳频率
+  /// Device timestamp frequency
+  uint64_t device_timestamp_frequency_hz_{microseconds_per_second};
   XRobot::DurationStatistics frame_capture_duration_{};
-  std::atomic<uint32_t> frames_committed_{0};  ///< 已提交帧数。
-  std::atomic<uint32_t> failure_count_{0};     ///< 失败帧数。
+  /// 已提交帧数
+  /// Number of committed frames
+  std::atomic<uint32_t> frames_committed_{0};
+  /// 失败帧数
+  /// Number of failed frames
+  std::atomic<uint32_t> failure_count_{0};
 };
