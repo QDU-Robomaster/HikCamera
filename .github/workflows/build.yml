@@ -7,7 +7,6 @@ jobs:
   build:
     uses: xrobot-org/XRobot/.github/workflows/module-ci.yml@v1
     with:
-      template-args: '["CameraTypes::FrameLayout{.width=640,.height=480,.step=1920,.encoding=CameraTypes::Encoding::BGR8}"]'
-      image: 'ghcr.io/xrobot-org/docker-image-webots:main'
-      cmake-options: '-DWEBOTS_HOME=/usr/local/webots'
-      ctest-regex: '^hik_camera_'
+      template-args: '[]'
+      apt-packages: 'libopencv-dev'
+      ctest-regex: '^hik_camera_test$'

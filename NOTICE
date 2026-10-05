@@ -2,15 +2,14 @@ HikCamera
 =========
 
 This repository is licensed under the Apache License 2.0 (see LICENSE), except
-for the third-party files listed below, which are not covered by that license.
+for the third-party files under hikSDK/, which are not covered by that license.
 
 hikSDK/
-  Files: include/CameraParams.h, include/MvCameraControl.h,
-         include/MvErrorDefine.h, include/MvISPErrorDefine.h,
-         include/PixelType.h,
-         lib/amd64/ and lib/arm64/: libFormatConversion.so, libMVRender.so,
-         libMediaProcess.so, libMvCameraControl.so, libMvUsb3vTL.so
-  Upstream: Hikrobot Machine Vision Software (MVS) SDK for Linux, Hikrobot Co., Ltd.
-  License: not stated in the vendored files. Use and redistribution of these files
-           are governed by Hikrobot's terms for the MVS SDK, not by this
-           repository's license.
+  Files: include/*.h, lib/amd64/ and lib/arm64/ (Hikrobot libraries, the bundled
+         libusb-1.0 and the FFmpeg libraries under ThirdParty/), CommonParameters.ini
+  Upstream: Hikrobot Machine Vision Software (MVS) SDK 5.0.2 for Linux
+            (MVS-5.0.2_x86_64_20260728, MVS-5.0.2_aarch64_20260728), Hikrobot Co., Ltd.
+  License: Use and redistribution of the Hikrobot files are governed by Hikrobot's
+           terms for the MVS SDK, not by this repository's license. The notices
+           shipped with the SDK, including those for libusb and FFmpeg (LGPL-2.1),
+           are in hikSDK/license/.
