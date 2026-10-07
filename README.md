@@ -1,255 +1,113 @@
 # HikCamera
 
-Hikrobot USB 相机采集模块：读取 BGR8 图像并写入 CameraBase 图像槽 / Hikrobot USB camera capture Module that reads BGR8 images into the CameraBase image slots
+海康 USB 相机驱动：BayerRG8 原始图像直接写入 CameraBase 图像槽 / Hikrobot USB camera driver that writes raw BayerRG8 images into the CameraBase slots
 
 ## 1. 模块作用 / Purpose
 
-HikCamera 从 Hikrobot USB 相机读取 BGR8 图像，写入 `CameraBase<FrameLayoutV>` 提供的图像槽。模块打开枚举到的第一台 USB 相机，在后台线程中取图并发布；初始化的任何一步失败时，构造抛出 `std::runtime_error`。
+HikCamera 是 CameraBase 的驱动，面向 MV-CS016-10UC（1440×1080）。它打开第一台 USB 相机，按 v4 数据采集时的设置配置相机，在 WIDE 档开始取流；取到的 BayerRG8 原始字节直接拷进图像槽，SDK 不做去马赛克。采集线程、图像池和图像 Topic 由 CameraBase 负责。
 
-HikCamera reads BGR8 images from a Hikrobot USB camera and writes them into the image slots provided by `CameraBase<FrameLayoutV>`. The Module opens the first enumerated USB camera and captures and publishes in a background thread; when any initialization step fails, the constructor throws `std::runtime_error`.
+HikCamera is a CameraBase driver for the MV-CS016-10UC (1440×1080). It opens the first USB camera, configures it with the settings used for the v4 data capture and starts streaming in the WIDE view. The raw BayerRG8 bytes are copied straight into the image slot with no demosaicing in the SDK. CameraBase runs the capture thread, the image pool and the image Topic.
 
-## 2. 相机几何与档位 / Camera Geometry and Profiles
+## 2. 相机设置 / Camera Settings
 
-模板参数 `FrameLayoutV` 描述相机实际输出图像的固定存储布局：
+启动时写入：`AcquisitionMode = Continuous`、`PixelFormat = BayerRG8`、`ADCBitDepth`、关闭自动曝光与自动增益、`ExposureTime`、`Gain`，以及触发方式。外触发为 Line0 上升沿，每个边沿一帧；不用外触发时按 `free_run_fps` 自由运行，供台架调试。关闭时不恢复相机原设置，其他工具启动时自行设置。
 
-- `encoding` 为 `CameraTypes::Encoding::BGR8`，`step` 等于 `width * 3`，二者在编译期检查。
-- `width` 与 `height` 须为相机 SDK 可接受的值。
-- 使用下采样时，`FrameLayoutV` 写下采样后的图像尺寸；`CameraCalibration` 始终保留原生传感器尺寸下的内参和畸变。
+At start-up the driver writes `AcquisitionMode = Continuous`, `PixelFormat = BayerRG8`, `ADCBitDepth`, auto exposure and auto gain off, `ExposureTime`, `Gain` and the trigger mode. External trigger is a Line0 rising edge, one frame per edge; without it the camera free-runs at `free_run_fps` for bench work. The previous camera settings are not restored on shutdown; other tools set their own.
 
-模块启动时按 `FrameLayoutV.width`、`FrameLayoutV.height` 和 WIDE 下采样倍率配置相机，并读回校验。WIDE 档以零偏移覆盖完整原生传感器：`width * wide_decimation_x` 与 `height * wide_decimation_y` 等于标定的原生尺寸，也等于下采样后 SDK 允许的最大宽高。默认产品配置使用 `720x540 / 2x2` 覆盖完整的 `1440x1080` 传感器，标定配置可使用 `1440x1080 / 1x1`。NARROW 档使用 `1x1` 下采样和同尺寸的居中 ROI，偏移按 SDK 步进向下对齐。启动前的宽高、偏移和下采样设置在关闭相机时恢复。下采样倍率和触发周期须大于零。
+`HikSettings` 与 YAML 一一对应：
 
-`Profiles()` 返回 WIDE 和 NARROW 两档，触发周期分别为 `wide_trigger_period_us` 与 `narrow_trigger_period_us`。请求当前档位时直接返回当前几何，采集已停止时返回 `STATE_ERR`。切换到另一档时，先停止采集线程并丢弃未提交的写槽，调用方在此之前先停止外部触发。同一目标配置最多尝试四次（首次加三次重试）：每次清空 SDK 缓存并确认停流，写入配置并读回校验，再启动采集。超过次数时记录失败步骤和目标参数，返回 `FAILED`，采集保持停止，`applied` 不变。
+| 字段 / Field | 含义 / Meaning |
+| --- | --- |
+| `exposure_us` | 曝光时间，微秒 / Exposure time in µs |
+| `gain_db` | 增益，dB / Gain in dB |
+| `adc_bits` | ADC 位深，8 或 12，必填 / ADC bit depth, 8 or 12, required |
+| `external_trigger` | true 为 Line0 外触发 / true for the Line0 trigger |
+| `free_run_fps` | 自由运行帧率，仅 `external_trigger = false` 时使用 / Free-run rate |
 
-`rotate_180 = true` 时，模块设置相机的 `ReverseX` 与 `ReverseY` 并读回确认，逐帧 geometry 带 `REVERSE_X | REVERSE_Y` 标志，图像旋转由相机完成，停止相机时恢复启动前的 `ReverseX` 与 `ReverseY`。`rotate_180 = false` 时保留设备当前的 `ReverseX` / `ReverseY` 状态，并写入 geometry 标志。两种情况下这两个节点都须可读，否则启动失败。
+ADC 位深决定读出时间：WIDE 档下 8 位约 3.4 ms、12 位约 5.7 ms。曝光与读出可以重叠，最短帧周期约为读出时间与“曝光时间 + 0.1 ms”中的较大者，外触发周期不能小于它。
 
-The template parameter `FrameLayoutV` describes the fixed storage layout of the images the camera actually outputs:
+The ADC bit depth sets the readout time: in WIDE about 3.4 ms at 8 bits and 5.7 ms at 12 bits. Exposure and readout overlap, so the shortest frame period is about the larger of the readout time and the exposure plus 0.1 ms; the trigger period must not be shorter.
 
-- `encoding` is `CameraTypes::Encoding::BGR8` and `step` equals `width * 3`; both are checked at compile time.
-- `width` and `height` are values the camera SDK accepts.
-- When decimation is used, `FrameLayoutV` holds the decimated image size; `CameraCalibration` always keeps the intrinsics and distortion at the native sensor size.
+## 3. 几何 / Geometry
 
-At startup the Module configures the camera from `FrameLayoutV.width`, `FrameLayoutV.height` and the WIDE decimation factors, and verifies by reading back. The WIDE profile covers the whole native sensor with zero offset: `width * wide_decimation_x` and `height * wide_decimation_y` equal the calibrated native size and also equal the maximum width and height the SDK allows after decimation. The default product configuration uses `720x540 / 2x2` to cover the full `1440x1080` sensor, and a calibration configuration can use `1440x1080 / 1x1`. The NARROW profile uses `1x1` decimation and a centered ROI of the same size, with offsets aligned down to the SDK step. The width, offset and decimation settings from before startup are restored when the camera is closed. Decimation factors and trigger periods are greater than zero.
+`ApplyView` 停止取流，依次写偏移清零、`DecimationHorizontal/Vertical`、`Width/Height = 640×512`、偏移，读回核对后重新开始取流；失败时重试 3 次。相机节点上的偏移以跳采后的像素计：WIDE 的原生起点 (80, 24) 写成 (40, 12)，NARROW 的偏移即原生偏移。
 
-`Profiles()` returns the WIDE and NARROW profiles with the trigger periods `wide_trigger_period_us` and `narrow_trigger_period_us`. Requesting the current profile returns the current geometry directly, and `STATE_ERR` when capture is stopped. Switching to the other profile first stops the capture thread and discards the uncommitted write slot; the caller stops the external trigger before that. The same target configuration is tried at most four times (the first attempt plus three retries): each attempt clears the SDK buffers and confirms the stream is stopped, writes the configuration and verifies by reading back, and then restarts capture. When the attempts are exhausted, the failed step and the target parameters are logged, `FAILED` is returned, capture stays stopped and `applied` is unchanged.
+`ApplyView` stops the stream, zeroes the offsets, writes `DecimationHorizontal/Vertical`, `Width/Height = 640×512` and the offsets, reads them back and restarts the stream; it retries 3 times on failure. Offsets on the camera are in decimated pixels: the WIDE native origin (80, 24) is written as (40, 12), and NARROW offsets are the native offsets.
 
-With `rotate_180 = true`, the Module sets the camera `ReverseX` and `ReverseY` and confirms by reading back; the per-frame geometry carries the `REVERSE_X | REVERSE_Y` flags, the camera performs the rotation, and the `ReverseX` and `ReverseY` from before startup are restored when the camera stops. With `rotate_180 = false`, the current `ReverseX` / `ReverseY` state of the device is kept and written into the geometry flags. In both cases the two nodes are readable, otherwise startup fails.
+`ApplyOffset`（NARROW 内移窗）不停流，只写 `OffsetX/Y` 并读回核对；失败时写回原偏移并返回 `FAILED`。
 
-## 3. 时间戳 / Timestamps
+`ApplyOffset` (a window move within NARROW) keeps the stream running, writes only `OffsetX/Y` and reads them back; on failure it writes the previous offsets back and returns `FAILED`.
 
-`ImageFrame::timestamp_us` 来自 Hikrobot 帧信息中的设备时间戳。代码读取：
+在 PI-HAILO-13T 上实测（MVS 5.0.2，自由运行 100 fps）：`SwitchView` 调用约 28 ms，按设备时间戳计两档之间的空档约 27 ms。
 
-```text
-nDevTimeStampHigh
-nDevTimeStampLow
-DeviceTimestampIncrement
-```
+Measured on PI-HAILO-13T (MVS 5.0.2, free-run 100 fps): `SwitchView` takes about 28 ms and the gap between the two views is about 27 ms in device time.
 
-`DeviceTimestampIncrement` 作为设备 tick 频率（Hz），用于把设备 tick 换算成微秒；该节点不可用时按 1 MHz（tick 即微秒）处理并打印警告。没有设备时间戳的帧被丢弃。`nHostTimeStamp` 只用于日志。
+## 4. 时间戳与帧计数 / Timestamps and Frame Counter
 
-`ImageFrame::timestamp_us` comes from the device timestamp in the Hikrobot frame information. The code reads the three fields listed in the code block above.
+`timestamp_us` 取设备时间戳（`nDevTimeStampHigh/Low`），按 `DeviceTimestampIncrement` 换算为微秒；该节点不可读时按 1 tick 等于 1 µs。设备时间戳在停止、开始取流后继续累加。
 
-`DeviceTimestampIncrement` is taken as the device tick frequency (Hz) and converts the device ticks to microseconds; when the node is unavailable, 1 MHz (one tick per microsecond) is assumed and a warning is printed. A frame without a device timestamp is discarded. `nHostTimeStamp` is used for logging only.
+`timestamp_us` is the device timestamp (`nDevTimeStampHigh/Low`) converted to microseconds with `DeviceTimestampIncrement`; when that node cannot be read, one tick is taken as 1 µs. The device timestamp keeps counting across stream stops and starts.
 
-## 4. 触发、曝光与恢复 / Trigger, Exposure and Restoration
+`frame_counter` 取 SDK 的 `nFrameNum`，每次开始取流从 0 起，连续递增。CameraFrameSync 用它把帧对应到触发边沿；没有空图像槽时这一帧被取出后丢弃，计数随之跳号。
 
-`external_trigger = true` 时使用：
+`frame_counter` is the SDK's `nFrameNum`, which restarts at 0 on every stream start and increases by one per frame. CameraFrameSync uses it to match frames to trigger edges; when no image slot is free the frame is grabbed and dropped, so the counter skips.
 
-```text
-TriggerMode = On
-TriggerSource = Line0
-TriggerActivation = RisingEdge
-```
-
-`external_trigger = false` 时关闭触发，模块自动开启 SDK 的 `AcquisitionFrameRateEnable` 并配置 `acquisition_frame_rate`，退出时恢复原帧率和使能状态。实际帧率受曝光、读出和传输能力约束。
-
-初始化设置 `AcquisitionMode = Continuous`、连续自动白平衡，关闭 `GainAuto` 与 `ExposureAuto`，并设置手动曝光时间和增益。仅当 SDK 明确返回 `MV_E_SUPPORT` 时跳过关闭自动曝光这一步，超时、访问错误等使初始化失败。增益超过 16 时截断为 16。
-
-`adc_bit_depth` 显式配置时，保存原值、设置并读回，失败则停止初始化。`gamma_enabled = true` 时先保存 Gamma 选择器，必要时切到 User，读取并保存原 User Gamma 后再写入新值；`gamma` 须有限且在 SDK 报告的 User Gamma 范围内，否则初始化报错。
-
-退出或后续初始化失败时，尝试恢复已修改的 ADC、Gamma 值及选择器、旋转、几何和帧率，恢复错误打印到日志。
-
-With `external_trigger = true` the camera uses the settings in the code block above.
-
-With `external_trigger = false` the trigger is off, and the Module enables the SDK `AcquisitionFrameRateEnable` and configures `acquisition_frame_rate`; the original frame rate and enable state are restored on exit. The actual frame rate is bounded by the exposure, readout and transfer capability.
-
-Initialization sets `AcquisitionMode = Continuous` and continuous auto white balance, turns off `GainAuto` and `ExposureAuto`, and sets the manual exposure time and gain. The step of turning off auto exposure is skipped only when the SDK explicitly returns `MV_E_SUPPORT`; timeouts, access errors and the like fail the initialization. A gain above 16 is clamped to 16.
-
-When `adc_bit_depth` is configured explicitly, the original value is saved, the new value is set and read back, and a failure stops the initialization. With `gamma_enabled = true`, the Gamma selector is saved first, switched to User when necessary, and the original User Gamma is read and saved before the new value is written; `gamma` is finite and within the User Gamma range the SDK reports, otherwise initialization reports an error.
-
-On exit or a later initialization failure, the Module tries to restore the modified ADC, Gamma value and selector, rotation, geometry and frame rate; restoration errors are printed to the log.
-
-## 5. 图像写入与 RamFS 命令 / Image Writing and RamFS Commands
-
-采集线程（`std::thread`）的流程：
-
-1. 等待图像槽可用，无空槽时每 1 ms 重试。
-2. 调用 `MV_CC_GetImageForBGR`，超时为 `grab_timeout_ms`。
-3. 检查图像宽高和字节数与当前 geometry 一致。
-4. 写入 `ImageFrame::timestamp_us` 和 `geometry`。
-5. 调用 `CommitImage()`。
-
-取图失败、尺寸不符或缺少设备时间戳都计入失败计数，该帧不提交。首个提交帧打印设备与主机时间戳、帧计数和丢包数。`OnMonitor()` 打印已提交帧数、失败帧数，以及单帧采集耗时统计（单位 us）。
-
-继承自 `CameraBase` 的 RamFS 命令（文件名为 `camera_name`）用于调整曝光和增益：
-
-```text
-set_exposure <microseconds>
-set_gain <value>
-```
-
-The capture thread (`std::thread`) proceeds as follows:
-
-1. Wait for an available image slot, retrying every 1 ms when no slot is free.
-2. Call `MV_CC_GetImageForBGR` with the timeout `grab_timeout_ms`.
-3. Check that the image width, height and byte count match the current geometry.
-4. Write `ImageFrame::timestamp_us` and `geometry`.
-5. Call `CommitImage()`.
-
-A failed grab, a size mismatch or a missing device timestamp counts as a failure and the frame is not committed. The first committed frame prints the device and host timestamps, the frame count and the lost-packet count. `OnMonitor()` prints the committed frame count, the failed frame count and the per-frame capture duration statistics in us.
-
-The RamFS command inherited from `CameraBase` (file name `camera_name`) adjusts exposure and gain, with the commands in the code block above.
-
-## 6. 构造接口 / Constructor
-
-```cpp
-template <CameraTypes::FrameLayout FrameLayoutV>
-class HikCamera : public CameraBase<FrameLayoutV>;
-
-explicit HikCamera(
-    LibXR::RamFS& ramfs,
-    CameraCalibration calibration = DefaultCalibration(),
-    RuntimeParam runtime = DefaultRuntime());
-```
-
-模板参数：
-
-- `FrameLayoutV`：相机输出布局，紧密排列的 BGR8，WIDE 档覆盖完整原生传感器。
-
-依赖：
-
-- `ramfs`：`LibXR::RamFS`，注册相机命令文件，取自 BSP 的硬件注册（`XR_REGISTER`）。
-
-配置参数：
-
-- `calibration`：原生标定，默认 `DefaultCalibration()`，即 1440x1080、`fx ≈ fy ≈ 2328.7`、`PLUMB_BOB` 五项畸变的实机标定。
-- `runtime`：`RuntimeParam`，字段如下表，默认值为 `DefaultRuntime()`。
-
-| 字段 | 默认值 | 说明 |
-| --- | --- | --- |
-| `camera_name` | `"camera"` | 相机实例名、RamFS 命令文件名，也是 CameraFrameSync 原始 IMU Topic 前缀。 |
-| `image_topic_name` | `"camera_image"` | 图像 Topic 名。 |
-| `imu_topic_name` | `"camera_imu"` | 同步 IMU Topic 名，交给 CameraBase。 |
-| `gain` | `16.0` | 相机增益，最大 16。 |
-| `exposure_time` | `2000.0` | 曝光时间，单位 us。 |
-| `external_trigger` | `true` | 使用 Line0 上升沿外触发。 |
-| `acquisition_frame_rate` | `249.0` | 非外触发时的自由运行帧率。 |
-| `grab_timeout_ms` | `100` | SDK 等待一帧图像的超时时间，单位 ms。 |
-| `image_node_num` | `3` | SDK 取流缓存节点数。 |
-| `rotate_180` | `false` | 使用相机 `ReverseX` / `ReverseY` 旋转 180 度。 |
-| `wide_decimation_x` | `2` | WIDE 档横向下采样倍率。 |
-| `wide_decimation_y` | `2` | WIDE 档纵向下采样倍率。 |
-| `wide_trigger_period_us` | `10000` | WIDE 档外触发周期，单位 us。 |
-| `narrow_trigger_period_us` | `5000` | NARROW 档外触发周期，单位 us。 |
-| `adc_bit_depth` | `std::nullopt` | 可选 `AdcBitDepth::BIT_8`、`BIT_10`、`BIT_11`、`BIT_12`；未指定时保留设备 ADC 位深。 |
-| `gamma_enabled` | `false` | `true` 时设置 User Gamma，`false` 时保留 Gamma。 |
-| `gamma` | `1.0` | User Gamma 请求值。 |
-
-`RuntimeParam` 可以按上表的顺序给出全部字段构造，参数名与字段名相同，末尾的 `adc_bit_depth`、`gamma_enabled`、`gamma` 带默认值。
-
-Template parameter:
-
-- `FrameLayoutV`: the camera output layout, tightly packed BGR8; the WIDE profile covers the whole native sensor.
-
-Dependencies:
-
-- `ramfs`: the `LibXR::RamFS` that registers the camera command file, taken from the BSP's Registration (`XR_REGISTER`).
-
-Configuration parameters:
-
-- `calibration`: the native calibration, default `DefaultCalibration()`, a calibration measured on the real camera at 1440x1080 with `fx ≈ fy ≈ 2328.7` and five `PLUMB_BOB` distortion terms.
-- `runtime`: `RuntimeParam` with the fields in the table below, default `DefaultRuntime()`.
-
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `camera_name` | `"camera"` | Camera instance name, the RamFS command file name, and the prefix of the raw IMU Topic of CameraFrameSync. |
-| `image_topic_name` | `"camera_image"` | Image Topic name. |
-| `imu_topic_name` | `"camera_imu"` | Synchronized IMU Topic name, passed to CameraBase. |
-| `gain` | `16.0` | Camera gain, at most 16. |
-| `exposure_time` | `2000.0` | Exposure time in us. |
-| `external_trigger` | `true` | Use the Line0 rising edge as the external trigger. |
-| `acquisition_frame_rate` | `249.0` | Free-running frame rate without external trigger. |
-| `grab_timeout_ms` | `100` | Timeout in ms for the SDK to wait for one image. |
-| `image_node_num` | `3` | Number of SDK stream buffer nodes. |
-| `rotate_180` | `false` | Rotate by 180 degrees with the camera `ReverseX` / `ReverseY`. |
-| `wide_decimation_x` | `2` | Horizontal decimation factor of the WIDE profile. |
-| `wide_decimation_y` | `2` | Vertical decimation factor of the WIDE profile. |
-| `wide_trigger_period_us` | `10000` | External trigger period of the WIDE profile in us. |
-| `narrow_trigger_period_us` | `5000` | External trigger period of the NARROW profile in us. |
-| `adc_bit_depth` | `std::nullopt` | Optional `AdcBitDepth::BIT_8`, `BIT_10`, `BIT_11` or `BIT_12`; the device ADC bit depth is kept when unspecified. |
-| `gamma_enabled` | `false` | `true` sets User Gamma, `false` keeps Gamma. |
-| `gamma` | `1.0` | Requested User Gamma value. |
-
-`RuntimeParam` can be constructed from all fields in the order of the table above, with parameter names equal to the field names; the trailing `adc_bit_depth`, `gamma_enabled` and `gamma` have defaults.
-
-## 7. Topic
-
-| Topic | 方向 | 类型 | 说明 |
-| --- | --- | --- | --- |
-| `runtime.image_topic_name`（默认 `camera_image`） | 发布 | `CameraBase<FrameLayoutV>::ImageTopicPayload`（`const SharedFrame*`） | 每个提交的图像，载荷仅在同步回调期间有效 |
-| `runtime.imu_topic_name`（默认 `camera_imu`） | 创建 | `CameraBase<FrameLayoutV>::ImuStamped` | CameraBase 创建的同步 IMU Topic，由 `PublishImu()` 发布 |
-
-| Topic | Direction | Type | Meaning |
-| --- | --- | --- | --- |
-| `runtime.image_topic_name` (default `camera_image`) | Publish | `CameraBase<FrameLayoutV>::ImageTopicPayload` (`const SharedFrame*`) | Each committed image; the payload is valid only during the synchronous callback |
-| `runtime.imu_topic_name` (default `camera_imu`) | Create | `CameraBase<FrameLayoutV>::ImuStamped` | Synchronized IMU Topic created by CameraBase and published by `PublishImu()` |
-
-## 8. 配置示例 / Configuration Example
-
-`xrobot instance add QDU-Robomaster/HikCamera --template-arg <FrameLayout>` 写入的实例，`template_args` 引用 YAML 中以 constexpr 定义的帧布局，`calibration` 与 `runtime` 为工具写入的 C++ 表达式 `DefaultCalibration()` 与 `DefaultRuntime()`，`ramfs` 填写为 BSP 中用 `XR_REGISTER`（硬件注册）注册的 RamFS 名称。默认标定为 1440x1080、默认 WIDE 下采样为 2x2，因此示例使用 720x540 布局。`runtime` 写成 YAML 映射时，键为第 6 节表中的字段名，字符串写成带引号的 C++ 字符串字面量。`CameraFrameSync` 实例用 `camera: camera` 引用本实例，列在本实例之后。
-
-An instance written by `xrobot instance add QDU-Robomaster/HikCamera --template-arg <FrameLayout>`; `template_args` refers to the frame layout defined as a constexpr in the YAML, `calibration` and `runtime` are the C++ expressions `DefaultCalibration()` and `DefaultRuntime()` written by the tool, and `ramfs` is set to a RamFS name registered in the BSP with `XR_REGISTER` (Registration). The default calibration is 1440x1080 and the default WIDE decimation is 2x2, so the example uses a 720x540 layout. When `runtime` is written as a YAML mapping, the keys are the field names in the table of section 6, and strings are written as quoted C++ string literals. A `CameraFrameSync` instance refers to this instance with `camera: camera` and is listed after it.
+## 5. 配置示例 / Configuration Example
 
 ```yaml
-constexpr_namespace: AutoAimRunConfig
-constexpr_includes:
-  - CameraBase.hpp
-constexprs:
-  HikFrameLayout:
-    type: CameraTypes::FrameLayout
-    value: '{.width = 720, .height = 540, .step = 2160, .encoding = CameraTypes::Encoding::BGR8}'
 modules:
   - module: QDU-Robomaster/HikCamera
     id: camera
-    template_args:
-      - AutoAimRunConfig::HikFrameLayout
     args:
-      - ramfs: ramfs
-      - calibration: HikCamera<AutoAimRunConfig::HikFrameLayout>::DefaultCalibration()
-      - runtime: HikCamera<AutoAimRunConfig::HikFrameLayout>::DefaultRuntime()
+      - calibration: AutoAimRunConfig::MainCameraCalibration
+      - narrow: {u: 0.5, v: 0.5}
+      - name: "gimbal"
+      - settings:
+          exposure_us: 2000.0F
+          gain_db: 16.0F
+          adc_bits: 8
+          external_trigger: true
+          free_run_fps: 0.0F
 ```
 
-## 9. 依赖与硬件 / Dependencies and Hardware
+相机名 `gimbal` 决定图像 Topic `gimbal_image`。打开或配置相机失败即致命退出，并打印失败的节点与 SDK 错误码。
 
-依赖：
+The camera name `gimbal` gives the image Topic `gimbal_image`. Failing to open or configure the camera is fatal; the log names the failing node and the SDK error code.
 
-- `QDU-Robomaster/CameraBase`：相机基类与共享图像槽。
-- `xrobot-org/DurationStatistics`：`OnMonitor()` 中的采集耗时统计。
-- Hikrobot MVS SDK：使用仓库内的 `hikSDK/include` 和 `hikSDK/lib`（amd64 与 arm64）构建；系统存在 `/opt/MVS`（含 `include/MvCameraControl.h` 和 `lib/64/libMvCameraControl.so`）时，CMake 优先使用系统安装的 SDK。链接 `MvCameraControl`、`MvUsb3vTL`、`FormatConversion`、`MediaProcess`、`MVRender`，支持 x86_64 和 aarch64 Linux。随仓库分发的 Hikrobot MVS SDK 文件适用其自身的许可条款，见 [NOTICE](NOTICE)。
-- LibXR。
+## 6. SDK 与运行环境 / SDK and Runtime
 
-硬件：Hikrobot USB 相机，外触发模式下 Line0 接触发信号。
+仓库自带 Hikrobot MVS 5.0.2（CameraControl 4.8.1.2）的头文件和 amd64、arm64 运行库，只含 USB 相机取流需要的文件，`hikSDK/SHA256SUMS` 列出各文件的哈希。系统装有官方 MVS（`/opt/MVS`）时 CMake 优先使用它：x86_64 取 `lib/64`，aarch64 取 `lib/aarch64`。
 
-Dependencies:
+The repository bundles the headers and the amd64 and arm64 runtime of Hikrobot MVS 5.0.2 (CameraControl 4.8.1.2), limited to the files a USB camera stream needs; `hikSDK/SHA256SUMS` lists their hashes. When the official MVS is installed under `/opt/MVS`, CMake uses it instead: `lib/64` on x86_64 and `lib/aarch64` on aarch64.
 
-- `QDU-Robomaster/CameraBase`: the camera base class and the shared image slots.
-- `xrobot-org/DurationStatistics`: the capture duration statistics in `OnMonitor()`.
-- Hikrobot MVS SDK: built with `hikSDK/include` and `hikSDK/lib` (amd64 and arm64) in the repository; when `/opt/MVS` exists (with `include/MvCameraControl.h` and `lib/64/libMvCameraControl.so`), CMake prefers the system-installed SDK. It links `MvCameraControl`, `MvUsb3vTL`, `FormatConversion`, `MediaProcess` and `MVRender`, and supports x86_64 and aarch64 Linux. The Hikrobot MVS SDK files distributed with the repository are covered by their own license terms, see [NOTICE](NOTICE).
-- LibXR.
+程序只直接链接 `libMvCameraControl.so`，其余库由 SDK 运行时加载，所以运行时须让 SDK 找到库目录：
 
-Hardware: a Hikrobot USB camera, with the trigger signal on Line0 in external trigger mode.
+The program links only `libMvCameraControl.so`; the SDK loads the other libraries at run time, so it has to be told where they are:
 
-## 10. 测试 / Tests
+```bash
+sdk=<HikCamera>/hikSDK
+lib=$sdk/lib/arm64
+export MVCAM_SDK_PATH=$sdk MVCAM_COMMON_RUNENV=$lib MVCAM_SOFTWARE_LIBENV=$lib
+export ALLUSERSPROFILE=$HOME/.cache/hikrobot-mvs
+export LD_LIBRARY_PATH=$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+```
 
-在打开 `BUILD_TESTING` 的 BSP 构建中，模块加入 `hik_camera_profile_control_test`（切档重试与 SDK 停流状态）和 `hik_camera_runtime_param_test`（`RuntimeParam` 各构造形式与默认值，编译期检查），用 `ctest` 运行。
+`ALLUSERSPROFILE` 指向一个可写目录，SDK 在其中缓存相机描述文件。非 root 用户访问相机需要 vendor `2bdf` 的 udev 规则。`libMVRender.so` 依赖系统的 `libGL`、`libX11`；无显示器时 SDK 打印 `XOpenDisplay Fail`，不影响取流。
 
-In a BSP build with `BUILD_TESTING` on, the Module adds `hik_camera_profile_control_test` (profile switch retries and the SDK stream state) and `hik_camera_runtime_param_test` (the constructor forms and defaults of `RuntimeParam`, checked at compile time), run with `ctest`.
+`ALLUSERSPROFILE` points to a writable directory where the SDK caches the camera description files. A non-root user needs a udev rule for vendor `2bdf`. `libMVRender.so` needs the system `libGL` and `libX11`; without a display the SDK prints `XOpenDisplay Fail`, which does not affect streaming.
+
+SDK 文件的使用与再分发遵循 Hikrobot 的 MVS SDK 条款，见 `NOTICE` 与 `hikSDK/license/`。
+
+Use and redistribution of the SDK files follow Hikrobot's MVS SDK terms; see `NOTICE` and `hikSDK/license/`.
+
+## 7. 测试 / Tests
+
+`tests/hik_camera_test.cpp` 检查几何到相机节点的换算、设备 tick 到微秒的换算和 ADC 枚举值，并链接一次完整的驱动以确认 SDK 符号齐全。实机行为（取流、切档、帧计数）需在接相机的机器上验证。
+
+`tests/hik_camera_test.cpp` checks the geometry-to-node conversion, the tick-to-microsecond conversion and the ADC enum values, and links the whole driver once to prove the SDK symbols resolve. Live behaviour (streaming, view switches, frame counter) is verified on a machine with the camera.
+
+## 8. 依赖 / Dependencies
+
+CameraBase、LibXR、Hikrobot MVS SDK。
+
+CameraBase, LibXR, Hikrobot MVS SDK.

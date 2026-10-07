@@ -1,0 +1,363 @@
+Open Source Software Licenses
+
+The information in this document applies to this product
+1.  Software Licensed under the BSD 3-Clause "New" or "Revised" License
+
+  This product includes software licensed under the BSD 3-Clause "New" or "Revised" License .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the BSD 3-Clause "New" or "Revised" License:
+
+   The FreeType Project 1.2.54
+
+   SPDX-License-Identifier: BSD-3-Clause
+   Please see below Urls for more details.
+   https://opensource.org/licenses/BSD-3-Clause
+   https://www.eclipse.org/org/documents/edl-v10.php
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+2.  Software Licensed under the MIT License
+
+  This product includes software licensed under the MIT License .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the MIT License:
+
+   libexpat 2.7.3
+   HarfBuzz 1.3.0
+   XCB 1.13
+   HarfBuzz 16.0.0
+   HarfBuzz 11.1.0
+
+   SPDX-License-Identifier: MIT
+   Please see below Urls for more details.
+   https://opensource.org/license/mit/
+   https://spdx.org/licenses/MIT.html
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+3.  Software Licensed under the libtiff License
+
+  This product includes software licensed under the libtiff License .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the libtiff License:
+
+   libTIFF 4.5.1
+   Copyright (c) 1988-1997 Sam Leffler
+   Copyright (c) 1991-1997 Silicon Graphics, Inc.
+
+   SPDX-License-Identifier: libtiff
+   Please see below Urls for more details.
+   https://fedoraproject.org/wiki/Licensing/libtiff
+   https://spdx.org/licenses/libtiff.html
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+4.  Software Licensed under the MIT License
+
+  This product includes software licensed under the MIT License .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the MIT License:
+
+   libicu 56
+   libicu 55
+
+   SPDX-License-Identifier: MIT
+   Please see below Urls for more details.
+   https://opensource.org/license/mit/
+   https://spdx.org/licenses/MIT.html
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+5.  Software Licensed under the libpng License
+
+  This product includes software licensed under the libpng License .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the libpng License:
+
+   libpng 1.6.43
+   libpng 1.6.47
+   libpng 1.6.55
+
+   SPDX-License-Identifier: Libpng
+   Please see below Urls for more details.
+   http://www.libpng.org/pub/png/src/libpng-LICENSE.txt
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+6.  Software Licensed under the MIT License
+
+  This product includes software licensed under the MIT License .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the MIT License:
+
+   GLEW 1.3.1
+   GLEW 2.2.0
+
+   SPDX-License-Identifier: MIT
+   Please see below Urls for more details.
+   https://opensource.org/license/mit/
+   https://spdx.org/licenses/MIT.html
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+7.  Software Licensed under the GNU General Public License v2.0 or later
+
+  This product includes software licensed under the GNU General Public License v2.0 or later .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the GNU General Public License v2.0 or later:
+
+   DBus dbus-1.13.12
+   Copyright (C) 1989, 1991 Free Software Foundation, Inc.
+   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
+
+   SPDX-License-Identifier: GPL-2.0-or-later
+   Please see below Urls for more details.
+   https://www.gnu.org/licenses/old-licenses/gpl-2.0-standalone.html
+   https://opensource.org/licenses/GPL-2.0
+   https://spdx.org/licenses/GPL-2.0-or-later.html
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+8.  Software Licensed under the The zlib License
+
+  This product includes software licensed under the zlib License .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the zlib License:
+
+   zlib 1.3.1
+   Copyright notice:
+   
+    (C) 1995-2022 Jean-loup Gailly and Mark Adler
+
+   SPDX-License-Identifier: Zlib
+   Please see below Urls for more details.
+   http://www.zlib.net/zlib_license.html
+   https://opensource.org/licenses/Zlib
+   https://spdx.org/licenses/Zlib.html
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+9.  Software Licensed under the The zlib License
+
+  This product includes software licensed under the zlib License .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the zlib License:
+
+   zlib 1.1.3
+   Copyright notice:
+   
+    (C) 1995-2022 Jean-loup Gailly and Mark Adler
+
+   SPDX-License-Identifier: Zlib
+   Please see below Urls for more details.
+   http://www.zlib.net/zlib_license.html
+   https://opensource.org/licenses/Zlib
+   https://spdx.org/licenses/Zlib.html
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+10.  Software Licensed under the The zlib License
+
+  This product includes software licensed under the zlib License .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the zlib License:
+
+   TinyXML2 v11.0.0
+
+   SPDX-License-Identifier: Zlib
+   Please see below Urls for more details.
+   http://www.zlib.net/zlib_license.html
+   https://opensource.org/licenses/Zlib
+   https://spdx.org/licenses/Zlib.html
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+11.  Software Licensed under the BSD 3-Clause "New" or "Revised" License
+
+  This product includes software licensed under the BSD 3-Clause "New" or "Revised" License .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the BSD 3-Clause "New" or "Revised" License:
+
+   PCRE 8.38
+   PCRE2 10.43
+   libzip 1.3.1
+   PCRE2 10.45
+   double-conversion 3.1.5
+   opus codec 1.3
+   libzip 1.11.4
+
+   SPDX-License-Identifier: BSD-3-Clause
+   Please see below Urls for more details.
+   https://opensource.org/licenses/BSD-3-Clause
+   https://www.eclipse.org/org/documents/edl-v10.php
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+12.  Software Licensed under the Freetype Project License
+
+  This product includes software licensed under the Freetype Project License .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the Freetype Project License:
+
+   The FreeType Project 2.14.1
+
+   SPDX-License-Identifier: FTL
+   Please see below Urls for more details.
+   http://freetype.fis.uniroma2.it/FTL.TXT
+   http://git.savannah.gnu.org/cgit/freetype/freetype2.git/tree/docs/FTL.TXT
+   http://gitlab.freedesktop.org/freetype/freetype/-/raw/master/docs/FTL.TXT
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+13.  Software Licensed under the libjpeg License
+
+  This product includes software licensed under the libjpeg License .
+  Please see Appendix I below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the libjpeg License:
+
+   libjpeg 3.0.3
+   libjpeg 3.0.2
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+14.  Software Licensed under the GNU Lesser General Public License v2.1
+
+  This product includes software licensed under the GNU Lesser General Public License v2.1 only .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the GNU Lesser General Public License v2.1 only:
+
+   libusb 1.0.20
+   Copyright (C) 1991, 1999 Free Software Foundation, Inc.
+   51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+   SPDX-License-Identifier: LGPL-2.1-only
+   Please see below Urls for more details.
+   https://www.gnu.org/licenses/old-licenses/lgpl-2.1-standalone.html
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+15.  Software Licensed under the GNU Lesser General Public License v2.1 or later
+
+  This product includes software licensed under the GNU Lesser General Public License v2.1 or later .
+  Please see below for the terms of this license.
+
+  Specifically, the following software included in this product is
+  subject to the GNU Lesser General Public License v2.1 or later:
+
+   FFmpeg 8.0
+   Copyright (C) 1991, 1999 Free Software Foundation, Inc.
+   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+   libusb 0.1.0
+   Copyright (C) 1991, 1999 Free Software Foundation, Inc.
+   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+
+   SPDX-License-Identifier: LGPL-2.1-or-later
+   Please see below Urls for more details.
+   https://www.gnu.org/licenses/old-licenses/lgpl-2.1-standalone.html
+   https://opensource.org/licenses/LGPL-2.1
+   https://spdx.org/licenses/LGPL-2.1-or-later.html
+
+  All software listed above is copyright by the respective author.
+  Please see the source code for detailed information.
+
+
+16. Disclaimer
+  All software listed in the above is provided without any liability or warranty from their copyright holders.
+
+17. Availability of Source Code
+  Provided that you are interested in all the open source code embedded in this  product,
+  please contact us at (opensource@hikrobotics.com). Noted that you are responsible for copying and mailing a hard copy at your request.
+  The software supplier will provide you with the respective source code and materials for a charge covering the cost of
+  performing such distribution (such as the cost of media, and shipping) in accordance with the terms and conditions of the applicable licenses.
+
+Appendix I
+   
+LICENSE TERMS (ships as a part of the libjpeg package in the README file)
+=============
+
+1. We don't promise that this software works.  (But if you find any bugs,
+   please let us know!)
+2. You can use this software for whatever you want.  You don't have to pay us.
+3. You may not pretend that you wrote this software.  If you use it in a
+   program, you must acknowledge somewhere in your documentation that
+   you've used the IJG code.
+
+In legalese:
+
+The authors make NO WARRANTY or representation, either express or implied,
+with respect to this software, its quality, accuracy, merchantability, or
+fitness for a particular purpose.  This software is provided "AS IS", and you,
+its user, assume the entire risk as to its quality and accuracy.
+
+This software is copyright (C) 1991-2016, Thomas G. Lane, Guido Vollbeding.
+All Rights Reserved except as specified below.
+
+Permission is hereby granted to use, copy, modify, and distribute this
+software (or portions thereof) for any purpose, without fee, subject to these
+conditions:
+(1) If any part of the source code for this software is distributed, then this
+README file must be included, with this copyright and no-warranty notice
+unaltered; and any additions, deletions, or changes to the original files
+must be clearly indicated in accompanying documentation.
+(2) If only executable code is distributed, then the accompanying
+documentation must state that "this software is based in part on the work of
+the Independent JPEG Group".
+(3) Permission for use of this software is granted only if the user accepts
+full responsibility for any undesirable consequences; the authors accept
+NO LIABILITY for damages of any kind.
+
+These conditions apply to any software derived from or based on the IJG code,
+not just to the unmodified library.  If you use our work, you ought to
+acknowledge us.
+
+Permission is NOT granted for the use of any IJG author's name or company name
+in advertising or publicity relating to this software or products derived from
+it.  This software may be referred to only as "the Independent JPEG Group's
+software".
+
+We specifically permit and encourage the use of this software as the basis of
+commercial products, provided that all warranty or liability claims are
+assumed by the product vendor.
+
