@@ -161,6 +161,40 @@ class HikCamera : public CameraBase
     return LibXR::ErrorCode::FAILED;
   }
 
+  /// 取流中只改 OffsetX/Y 并读回核对，失败时写回原偏移 / Write only OffsetX/Y while
+  /// grabbing and read them back; on failure the previous offsets are written back.
+  LibXR::ErrorCode ApplyOffset(const CameraTypes::FrameGeometry& geometry) override
+  {
+    const HikCameraDetail::NodeGeometry node = HikCameraDetail::ToNodeGeometry(geometry);
+    if (WriteOffset(node.offset_x, node.offset_y))
+    {
+      return LibXR::ErrorCode::OK;
+    }
+    const HikCameraDetail::NodeGeometry previous =
+        HikCameraDetail::ToNodeGeometry(CurrentGeometry());
+    if (!WriteOffset(previous.offset_x, previous.offset_y))
+    {
+      XR_LOG_ERROR("%s: restoring the window offset failed", Name().c_str());
+    }
+    return LibXR::ErrorCode::FAILED;
+  }
+
+  bool WriteOffset(int64_t offset_x, int64_t offset_y)
+  {
+    MVCC_INTVALUE_EX read_x{}, read_y{};
+    const bool ok = SetInt("OffsetX", offset_x) && SetInt("OffsetY", offset_y) &&
+                    MV_CC_GetIntValueEx(handle_, "OffsetX", &read_x) == MV_OK &&
+                    MV_CC_GetIntValueEx(handle_, "OffsetY", &read_y) == MV_OK &&
+                    read_x.nCurValue == offset_x && read_y.nCurValue == offset_y;
+    if (!ok)
+    {
+      XR_LOG_ERROR("%s: offset read back as +%d+%d, wanted +%d+%d", Name().c_str(),
+                   static_cast<int>(read_x.nCurValue), static_cast<int>(read_y.nCurValue),
+                   static_cast<int>(offset_x), static_cast<int>(offset_y));
+    }
+    return ok;
+  }
+
   bool Open()
   {
     MV_CC_DEVICE_INFO_LIST devices{};
