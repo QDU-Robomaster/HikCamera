@@ -34,6 +34,10 @@ The ADC bit depth sets the readout time: in WIDE about 3.4 ms at 8 bits and 5.7 
 
 `ApplyView` stops the stream, zeroes the offsets, writes `DecimationHorizontal/Vertical`, `Width/Height = 640×512` and the offsets, reads them back and restarts the stream; it retries 3 times on failure. Offsets on the camera are in decimated pixels: the WIDE native origin (80, 24) is written as (40, 12), and NARROW offsets are the native offsets.
 
+`ApplyOffset`（NARROW 内移窗）不停流，只写 `OffsetX/Y` 并读回核对；失败时写回原偏移并返回 `FAILED`。
+
+`ApplyOffset` (a window move within NARROW) keeps the stream running, writes only `OffsetX/Y` and reads them back; on failure it writes the previous offsets back and returns `FAILED`.
+
 在 PI-HAILO-13T 上实测（MVS 5.0.2，自由运行 100 fps）：`SwitchView` 调用约 28 ms，按设备时间戳计两档之间的空档约 27 ms。
 
 Measured on PI-HAILO-13T (MVS 5.0.2, free-run 100 fps): `SwitchView` takes about 28 ms and the gap between the two views is about 27 ms in device time.
